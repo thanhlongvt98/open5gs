@@ -124,6 +124,15 @@ typedef struct upf_sess_s {
     /* Accounting: */
     upf_sess_urr_acc_t urr_acc[OGS_MAX_NUM_OF_URR]; /* FIXME: This probably needs to be mved to a hashtable or alike */
     char            *apn_dnn;            /* APN/DNN Item */
+
+    /* UPF-local Ethernet PDU session correlation state (Phase 5 Step 1).
+     * SMF owns session/QoS intent; this is a UPF-local cache for NW-TT
+     * observability (Step 5) and Ethernet fast-path classification (Step 2).
+     * Deliberately NOT placed in the shared lib/pfcp (Issue 5-A). */
+    struct {
+        bool    ethernet;      /* session_type == OGS_PDU_SESSION_TYPE_ETHERNET */
+        uint8_t session_type;  /* OGS_PDU_SESSION_TYPE_* seen at N4 establishment */
+    } correlation;
 } upf_sess_t;
 
 void upf_context_init(void);
@@ -146,6 +155,9 @@ upf_sess_t *upf_sess_find_by_id(ogs_pool_id_t id);
 
 uint8_t upf_sess_set_ue_ip(upf_sess_t *sess,
         uint8_t session_type, ogs_pfcp_pdr_t *pdr);
+/* Phase 5 Step 1: record the PDU session type as UPF-local correlation state
+ * (logs the creation for an Ethernet PDU session). */
+void upf_sess_set_correlation(upf_sess_t *sess, uint8_t session_type);
 uint8_t upf_sess_set_ue_ipv4_framed_routes(upf_sess_t *sess,
         char *framed_routes[]);
 uint8_t upf_sess_set_ue_ipv6_framed_routes(upf_sess_t *sess,

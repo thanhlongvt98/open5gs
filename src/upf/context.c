@@ -505,6 +505,25 @@ uint8_t upf_sess_set_ue_ip(upf_sess_t *sess,
     return cause_value;
 }
 
+void upf_sess_set_correlation(upf_sess_t *sess, uint8_t session_type)
+{
+    ogs_assert(sess);
+
+    sess->correlation.session_type = session_type;
+    sess->correlation.ethernet =
+        (session_type == OGS_PDU_SESSION_TYPE_ETHERNET);
+
+    /* Log only for Ethernet PDU sessions: this is the UPF-local correlation
+     * state used later for NW-TT observability and fast-path classification.
+     * IP sessions keep the common path quiet. */
+    if (sess->correlation.ethernet)
+        ogs_info("[UPF] Ethernet PDU session correlation state created "
+                 "(UPF-SEID[0x%llx] SMF-SEID[0x%llx] DNN[%s])",
+                 (unsigned long long)sess->upf_n4_seid,
+                 (unsigned long long)sess->smf_n4_f_seid.seid,
+                 sess->apn_dnn ? sess->apn_dnn : "");
+}
+
 /* Remove amd free framed ROUTE from TRIE. It isn't an error if the framed
    route doesn't exist in TRIE. */
 static void free_framed_route_from_trie(ogs_ipsubnet_t *route)

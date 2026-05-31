@@ -208,6 +208,12 @@ void upf_n4_handle_session_establishment_request(
                     OGS_PFCP_OBJ_SESS_TYPE, pdr, restoration_indication);
     }
 
+    /* Phase 5 Step 1: record the PDU session type as UPF-local correlation
+     * state (logs creation for an Ethernet PDU session). Done independently of
+     * the UE-IP block above, since an Ethernet session carries no UE IP. */
+    if (req->pdn_type.presence == 1)
+        upf_sess_set_correlation(sess, req->pdn_type.u8);
+
     /* Send Buffered Packet to gNB/SGW */
     ogs_list_for_each(&sess->pfcp.pdr_list, pdr) {
         if (pdr->src_if == OGS_PFCP_INTERFACE_CORE) { /* Downlink */
