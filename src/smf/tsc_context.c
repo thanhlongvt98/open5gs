@@ -42,6 +42,23 @@ void smf_sess_tsc_remove(smf_sess_t *sess)
     }
 }
 
+void smf_sess_tsc_set_status(tsc_context_t *tsc,
+        tsc_status_t status, const char *reason)
+{
+    ogs_assert(tsc);
+
+    tsc->status = status;
+    ogs_cpystrn(tsc->downgrade_reason, reason ? reason : "",
+            sizeof(tsc->downgrade_reason));
+
+    if (status == TSC_STATUS_PARTIAL || status == TSC_STATUS_DOWNGRADED)
+        ogs_warn("[SMF] TSC %s: %s",
+                status == TSC_STATUS_PARTIAL ? "PARTIAL" : "DOWNGRADED",
+                tsc->downgrade_reason);
+    else
+        ogs_info("[SMF] TSC status[%d]", status);
+}
+
 void smf_sess_tsc_derive(const tsc_context_t *tsc,
         uint32_t *periodicity_5g, uint64_t *bat_5g, bool *has_bat)
 {

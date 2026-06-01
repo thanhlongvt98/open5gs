@@ -362,7 +362,7 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_setup_request_transfer(
          * QoS Flow Setup Request Item when the session carries TSC assistance
          * for this QFI. Direction selects the DL/UL sub-IE(s). The gNB decodes
          * the IE (RAN consumption is Phase 3); baseline flows add nothing. */
-        if (sess->tsc && sess->tsc->status != TSC_STATUS_ABSENT &&
+        if (sess->tsc && sess->tsc->status == TSC_STATUS_ACTIVE &&
                 qos_flow->qfi == sess->tsc->qfi) {
             NGAP_ProtocolExtensionContainer_11905P280_t *tscExtContainer = NULL;
             NGAP_QosFlowSetupRequestItem_ExtIEs_t *tscExtIe = NULL;
@@ -399,6 +399,15 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_setup_request_transfer(
                      "QFI[%d] dir[%d] periodicity[%llu us]",
                      qos_flow->qfi, sess->tsc->direction,
                      (unsigned long long)sess->tsc->periodicity_us);
+        } else if (sess->tsc && sess->tsc->status != TSC_STATUS_ABSENT &&
+                qos_flow->qfi == sess->tsc->qfi) {
+            /* Phase 6 Step 4: TSC was requested for this flow but is not ACTIVE
+             * (PARTIAL/DOWNGRADED) — omit the IE and run on the 5QI. The reason
+             * is surfaced so the baseline fallback is explicit in logs. */
+            ogs_warn("[SMF] NGAP TSC IE omitted: QFI[%d] status[%d] reason[%s] "
+                     "-- flow proceeds on baseline 5QI",
+                     qos_flow->qfi, sess->tsc->status,
+                     sess->tsc->downgrade_reason);
         }
     }
 

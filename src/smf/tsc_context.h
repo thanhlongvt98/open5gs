@@ -67,8 +67,25 @@ typedef struct {
  * Step 1 wires only the remove() on session release; the policy-driven add()
  * call is added in Step 2 (PCF -> SMF ingestion).
  */
+/* Phase 6 Step 4: stable downgrade/partial reason strings (for Phase-7/8
+ * scenario labeling). */
+#define TSC_REASON_NO_PERIODICITY \
+    "TSCAI missing mandatory periodicity; flow on baseline 5QI"
+#define TSC_REASON_PERIODICITY_RANGE \
+    "TSCAI periodicity exceeds NGAP max 640000 us; flow on baseline 5QI"
+#define TSC_REASON_RAN_GBR \
+    "NG-RAN cannot guarantee GFBR (TS 23.501 5.7.2.4); flow on baseline 5QI"
+
 tsc_context_t *smf_sess_tsc_add(smf_sess_t *sess);
 void           smf_sess_tsc_remove(smf_sess_t *sess);
+
+/*
+ * Phase 6 Step 4: set the TSC status and record a concrete reason, logging the
+ * outcome (ogs_warn for PARTIAL/DOWNGRADED, ogs_info otherwise) so the baseline
+ * fallback is explicit in worklog/logs/. reason may be NULL for ACTIVE/ABSENT.
+ */
+void smf_sess_tsc_set_status(tsc_context_t *tsc,
+        tsc_status_t status, const char *reason);
 
 /*
  * Phase 6 Step 3: derive the RAN-facing TSCAI (5G clock domain) from the

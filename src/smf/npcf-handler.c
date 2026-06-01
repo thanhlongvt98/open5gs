@@ -69,12 +69,18 @@ static void smf_tsc_ingest_pcc_rule(
     else
         tsc->direction = TSC_UL;
 
-    /* ACTIVE only when the core TSCAI fields (periodicity + burst arrival time)
-     * are present; otherwise the hint is PARTIAL (downgrade is Step 4). */
-    if (t->is_periodicity && t->burst_arrival_time)
-        tsc->status = TSC_STATUS_ACTIVE;
+    /* Phase 6 Step 4: classify on the MANDATORY field. Periodicity is mandatory
+     * (TS 38.413 §9.3.1.131); Burst Arrival Time is optional (absent until the
+     * Phase-7 5G-clock conversion), so its absence is NOT a downgrade. A flow
+     * that is not ACTIVE omits the NGAP IE and runs on its 5QI. */
+    if (!t->is_periodicity)
+        smf_sess_tsc_set_status(tsc, TSC_STATUS_PARTIAL,
+                TSC_REASON_NO_PERIODICITY);
+    else if (tsc->periodicity_us > 640000)
+        smf_sess_tsc_set_status(tsc, TSC_STATUS_DOWNGRADED,
+                TSC_REASON_PERIODICITY_RANGE);
     else
-        tsc->status = TSC_STATUS_PARTIAL;
+        smf_sess_tsc_set_status(tsc, TSC_STATUS_ACTIVE, NULL);
 
     ogs_info("[SMF] TSC ingest: PSI[%d] dir[%d] periodicity[%llu us] "
              "survival[%u us] status[%d]",

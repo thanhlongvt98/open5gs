@@ -603,6 +603,15 @@ void smf_qos_flow_binding(smf_sess_t *sess)
                 if (sess->tsc && sess->tsc->qfi == 0)
                     sess->tsc->qfi = qos_flow->qfi;
 
+                /* Phase 6 Step 4: a TSC-assisted flow that is not ACTIVE runs on
+                 * its baseline 5QI (the NGAP TSC IE is omitted) — record it so
+                 * the fallback success path is visible at the binding stage. */
+                if (sess->tsc && sess->tsc->qfi == qos_flow->qfi &&
+                        sess->tsc->status != TSC_STATUS_ACTIVE)
+                    ogs_info("[SMF] QoS flow QFI[%d] on baseline 5QI "
+                             "(TSC status[%d])",
+                             qos_flow->qfi, sess->tsc->status);
+
                 qos_flow_created = true;
 
             } else {
