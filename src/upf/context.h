@@ -53,6 +53,7 @@ typedef struct upf_context_s {
     ogs_hash_t *smf_n4_f_seid_hash; /* hash table (SMF-N4-F-SEID) */
     ogs_hash_t *ipv4_hash;  /* hash table (IPv4 Address) */
     ogs_hash_t *ipv6_hash;  /* hash table (IPv6 Address) */
+    ogs_hash_t *mac_hash;   /* hash table (learned dst-MAC -> Ethernet sess) */
 
     /* IPv4 framed routes trie */
     struct upf_route_trie_node *ipv4_framed_routes;
@@ -68,6 +69,15 @@ struct upf_route_trie_node {
     struct upf_route_trie_node *right;
     upf_sess_t *sess;
 };
+
+#define UPF_MAC_ALEN 6
+
+/* A learned source MAC for an Ethernet PDU session. The mac[] field backs the
+ * key stored in upf_self()->mac_hash (the hash keeps the pointer, not a copy). */
+typedef struct upf_sess_mac_s {
+    ogs_lnode_t lnode;
+    uint8_t     mac[UPF_MAC_ALEN];
+} upf_sess_mac_t;
 
 /* Accounting: */
 typedef struct upf_sess_urr_acc_s {
@@ -134,6 +144,12 @@ typedef struct upf_sess_s {
         uint8_t session_type;  /* OGS_PDU_SESSION_TYPE_* seen at N4 establishment */
     } correlation;
 
+    /* NW-TT MAC-learning bridge (Phase 5 Step 4): the inner source MACs learned
+     * from UL frames on this Ethernet PDU session. Each entry's mac[] backs a
+     * key in upf_self()->mac_hash; the list lets us evict them on session
+     * removal. TS 23.501 §5.8.2.5.3 / §5.6.10.2. */
+    ogs_list_t      mac_list;
+
     /* NW-TT bridge-port state from the standard PFCP TSC IEs (Phase 5 Step 3).
      * Populated only when the SMF sends create_bridge_info_for_tsc / a PMIC over
      * N4 (TS 29.244). UPF-local (Issue 5-A); the shared lib/pfcp is unchanged. */
@@ -161,6 +177,11 @@ upf_sess_t *upf_sess_find_by_smf_n4_f_seid(ogs_pfcp_f_seid_t *f_seid);
 upf_sess_t *upf_sess_find_by_upf_n4_seid(uint64_t seid);
 upf_sess_t *upf_sess_find_by_ipv4(uint32_t addr);
 upf_sess_t *upf_sess_find_by_ipv6(uint32_t *addr6);
+/* Phase 5 Step 4: NW-TT MAC-learning bridge for Ethernet PDU sessions.
+ * upf_sess_learn_mac() records an inner source MAC seen on UL; the matching
+ * upf_sess_find_by_mac() resolves a DL frame's destination MAC to its session. */
+void upf_sess_learn_mac(upf_sess_t *sess, const uint8_t *mac);
+upf_sess_t *upf_sess_find_by_mac(const uint8_t *mac);
 upf_sess_t *upf_sess_find_by_id(ogs_pool_id_t id);
 
 uint8_t upf_sess_set_ue_ip(upf_sess_t *sess,

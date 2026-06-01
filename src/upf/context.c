@@ -63,6 +63,9 @@ void upf_context_init(void)
     ogs_assert(self.ipv4_hash);
     self.ipv6_hash = ogs_hash_make();
     ogs_assert(self.ipv6_hash);
+    /* NW-TT bridge MAC table: learned dst-MAC -> Ethernet PDU session. */
+    self.mac_hash = ogs_hash_make();
+    ogs_assert(self.mac_hash);
 
     context_initialized = 1;
 }
@@ -92,6 +95,8 @@ void upf_context_final(void)
     ogs_hash_destroy(self.ipv4_hash);
     ogs_assert(self.ipv6_hash);
     ogs_hash_destroy(self.ipv6_hash);
+    ogs_assert(self.mac_hash);
+    ogs_hash_destroy(self.mac_hash);
 
     free_upf_route_trie_node(self.ipv4_framed_routes);
     free_upf_route_trie_node(self.ipv6_framed_routes);
@@ -242,6 +247,16 @@ int upf_sess_remove(upf_sess_t *sess)
         ogs_pfcp_ue_ip_free(sess->ipv6);
     }
 
+    /* Evict any MACs this Ethernet PDU session learned from the bridge table. */
+    if (ogs_list_first(&sess->mac_list)) {
+        upf_sess_mac_t *mac_entry = NULL, *mac_next = NULL;
+        ogs_list_for_each_safe(&sess->mac_list, mac_next, mac_entry) {
+            ogs_hash_set(self.mac_hash, mac_entry->mac, UPF_MAC_ALEN, NULL);
+            ogs_list_remove(&sess->mac_list, mac_entry);
+            ogs_free(mac_entry);
+        }
+    }
+
     upf_sess_set_ue_ipv4_framed_routes(sess, NULL);
     upf_sess_set_ue_ipv6_framed_routes(sess, NULL);
 
@@ -354,6 +369,41 @@ upf_sess_t *upf_sess_find_by_ipv6(uint32_t *addr6)
             trie = trie->left;
     }
     return ret;
+}
+
+void upf_sess_learn_mac(upf_sess_t *sess, const uint8_t *mac)
+{
+    upf_sess_mac_t *entry = NULL;
+
+    ogs_assert(sess);
+    ogs_assert(mac);
+    ogs_assert(self.mac_hash);
+
+    /* Already mapped to this session — nothing to learn. */
+    if (ogs_hash_get(self.mac_hash, mac, UPF_MAC_ALEN) == sess)
+        return;
+
+    entry = ogs_calloc(1, sizeof(*entry));
+    ogs_assert(entry);
+    memcpy(entry->mac, mac, UPF_MAC_ALEN);
+    ogs_list_add(&sess->mac_list, entry);
+
+    /* The hash keeps the key pointer (entry->mac), not a copy. If this MAC was
+     * previously mapped to another session, ogs_hash_set rebinds the value to
+     * this session (the old owner still drops its stale node on removal). */
+    ogs_hash_set(self.mac_hash, entry->mac, UPF_MAC_ALEN, sess);
+
+    ogs_info("[UPF] NW-TT learned MAC "
+            "[%02x:%02x:%02x:%02x:%02x:%02x] -> UPF-N4-SEID[0x%llx]",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+            (unsigned long long)sess->upf_n4_seid);
+}
+
+upf_sess_t *upf_sess_find_by_mac(const uint8_t *mac)
+{
+    ogs_assert(mac);
+    ogs_assert(self.mac_hash);
+    return ogs_hash_get(self.mac_hash, mac, UPF_MAC_ALEN);
 }
 
 upf_sess_t *upf_sess_find_by_id(ogs_pool_id_t id)

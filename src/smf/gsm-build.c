@@ -148,26 +148,32 @@ ogs_pkbuf_t *gsm_build_pdu_session_establishment_accept(smf_sess_t *sess)
     ogs_nas_bitrate_from_uint64(
             &session_ambr->uplink, sess->session.ambr.uplink);
 
-    /* PDU Address */
-    pdu_session_establishment_accept->presencemask |=
-        OGS_NAS_5GS_PDU_SESSION_ESTABLISHMENT_ACCEPT_PDU_ADDRESS_PRESENT;
-    pdu_address->pdn_type = sess->session.session_type;
+    /* PDU Address
+     *
+     * TS 24.501 §9.11.4.10: the PDU Address IE carries the UE IP address and is
+     * present only for IP-type sessions. For an Ethernet PDU session there is no
+     * UE IP, so the entire IE is omitted from the ESTABLISHMENT ACCEPT. */
+    if (sess->session.session_type != OGS_PDU_SESSION_TYPE_ETHERNET) {
+        pdu_session_establishment_accept->presencemask |=
+            OGS_NAS_5GS_PDU_SESSION_ESTABLISHMENT_ACCEPT_PDU_ADDRESS_PRESENT;
+        pdu_address->pdn_type = sess->session.session_type;
 
-    if (pdu_address->pdn_type == OGS_PDU_SESSION_TYPE_IPV4) {
-        pdu_address->addr = sess->paa.addr;
-        pdu_address->length = OGS_NAS_PDU_ADDRESS_IPV4_LEN;
-    } else if (pdu_address->pdn_type == OGS_PDU_SESSION_TYPE_IPV6) {
-        memcpy(pdu_address->addr6,
-                sess->paa.addr6+(OGS_IPV6_LEN>>1), OGS_IPV6_LEN>>1);
-        pdu_address->length = OGS_NAS_PDU_ADDRESS_IPV6_LEN;
-    } else if (pdu_address->pdn_type == OGS_PDU_SESSION_TYPE_IPV4V6) {
-        pdu_address->both.addr = sess->paa.both.addr;
-        memcpy(pdu_address->both.addr6,
-            sess->paa.both.addr6+(OGS_IPV6_LEN>>1), OGS_IPV6_LEN>>1);
-        pdu_address->length = OGS_NAS_PDU_ADDRESS_IPV4V6_LEN;
-    } else {
-        ogs_error("Unexpected PDN Type %u", pdu_address->pdn_type);
-        goto cleanup;
+        if (pdu_address->pdn_type == OGS_PDU_SESSION_TYPE_IPV4) {
+            pdu_address->addr = sess->paa.addr;
+            pdu_address->length = OGS_NAS_PDU_ADDRESS_IPV4_LEN;
+        } else if (pdu_address->pdn_type == OGS_PDU_SESSION_TYPE_IPV6) {
+            memcpy(pdu_address->addr6,
+                    sess->paa.addr6+(OGS_IPV6_LEN>>1), OGS_IPV6_LEN>>1);
+            pdu_address->length = OGS_NAS_PDU_ADDRESS_IPV6_LEN;
+        } else if (pdu_address->pdn_type == OGS_PDU_SESSION_TYPE_IPV4V6) {
+            pdu_address->both.addr = sess->paa.both.addr;
+            memcpy(pdu_address->both.addr6,
+                sess->paa.both.addr6+(OGS_IPV6_LEN>>1), OGS_IPV6_LEN>>1);
+            pdu_address->length = OGS_NAS_PDU_ADDRESS_IPV4V6_LEN;
+        } else {
+            ogs_error("Unexpected PDN Type %u", pdu_address->pdn_type);
+            goto cleanup;
+        }
     }
 
     /* GSM cause */

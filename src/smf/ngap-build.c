@@ -126,6 +126,9 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_setup_request_transfer(
     case OGS_PDU_SESSION_TYPE_IPV4V6 :
         *PDUSessionType = NGAP_PDUSessionType_ipv4v6;
         break;
+    case OGS_PDU_SESSION_TYPE_ETHERNET :
+        *PDUSessionType = NGAP_PDUSessionType_ethernet;
+        break;
     default:
         ogs_fatal("Unknown PDU Session Type [%d]", sess->session.session_type);
         ogs_assert_if_reached();

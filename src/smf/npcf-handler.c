@@ -521,16 +521,23 @@ bool smf_npcf_smpolicycontrol_handle_create(
     up2cp_far = sess->up2cp_far;
     ogs_assert(up2cp_far);
 
-    /* Set UE IP Address to the Default DL PDR */
-    ogs_assert(OGS_OK ==
-        ogs_pfcp_paa_to_ue_ip_addr(&sess->paa,
-            &dl_pdr->ue_ip_addr, &dl_pdr->ue_ip_addr_len));
-    dl_pdr->ue_ip_addr.sd = OGS_PFCP_UE_IP_DST;
-
-    if (ogs_global_conf()->parameter.use_upg_vpp == true) {
+    if (sess->session.session_type == OGS_PDU_SESSION_TYPE_ETHERNET) {
+        /* Ethernet PDU session: no UE IP address. Instead flag the DL PDR with
+         * the Ethernet PDU Session Information IE (ETHI, TS 29.244 §8.2.117) so
+         * the UPF treats DL traffic as Ethernet PDU-session frames. */
+        dl_pdr->ethernet_pdu_session_information = true;
+    } else {
+        /* Set UE IP Address to the Default DL PDR */
         ogs_assert(OGS_OK ==
             ogs_pfcp_paa_to_ue_ip_addr(&sess->paa,
-                &ul_pdr->ue_ip_addr, &ul_pdr->ue_ip_addr_len));
+                &dl_pdr->ue_ip_addr, &dl_pdr->ue_ip_addr_len));
+        dl_pdr->ue_ip_addr.sd = OGS_PFCP_UE_IP_DST;
+
+        if (ogs_global_conf()->parameter.use_upg_vpp == true) {
+            ogs_assert(OGS_OK ==
+                ogs_pfcp_paa_to_ue_ip_addr(&sess->paa,
+                    &ul_pdr->ue_ip_addr, &ul_pdr->ue_ip_addr_len));
+        }
     }
 
     if (sess->session.ipv4_framed_routes &&

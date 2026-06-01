@@ -121,6 +121,85 @@ static const char *upf_eth_class_str(upf_eth_class_t c)
     }
 }
 
+/* Phase 5 Step 4: NW-TT MAC-learning bridge (TS 23.501 §5.8.2.5.3).
+ *
+ * The Ethernet PDU session's N6 egress is a TAP device handing us full L2
+ * frames. We use the first configured TAP as the bridge port (single Ethernet
+ * DN in this testbed; matches OAI's single N6 redirect interface). */
+static ogs_pfcp_dev_t *upf_eth_bridge_dev(void)
+{
+    ogs_pfcp_dev_t *dev = NULL;
+    ogs_list_for_each(&ogs_pfcp_self()->dev_list, dev) {
+        if (dev->is_tap)
+            return dev;
+    }
+    return NULL;
+}
+
+/* Select the downlink PDR of an Ethernet PDU session and hand the raw L2 frame
+ * to ogs_pfcp_up_handle_pdr(), which applies the FAR Outer Header Creation
+ * (GTP-U encap toward the gNB). Consumes pkbuf on success. Ethernet PDRs are
+ * match-all (no IP rule list), so no per-packet filter lookup is done.
+ * Returns true if the frame was forwarded (pkbuf consumed). */
+static bool upf_eth_dl_forward(upf_sess_t *sess, ogs_pkbuf_t *pkbuf)
+{
+    ogs_pfcp_pdr_t *pdr = NULL, *fallback_pdr = NULL;
+    ogs_pfcp_far_t *far = NULL;
+    ogs_pfcp_user_plane_report_t report;
+    int i;
+
+    ogs_assert(sess);
+    ogs_assert(pkbuf);
+
+    ogs_list_for_each(&sess->pfcp.pdr_list, pdr) {
+        far = pdr->far;
+        if (!far)
+            continue;
+        if (pdr->src_if != OGS_PFCP_INTERFACE_CORE)
+            continue;
+        fallback_pdr = pdr;
+        if (far->dst_if != OGS_PFCP_INTERFACE_ACCESS)
+            continue;
+        if (far->outer_header_creation.gtpu4 == 0 &&
+            far->outer_header_creation.gtpu6 == 0)
+            continue;
+        break;
+    }
+    if (!pdr)
+        pdr = fallback_pdr;
+    if (!pdr)
+        return false;
+
+    for (i = 0; i < pdr->num_of_urr; i++)
+        upf_sess_urr_acc_add(sess, pdr->urr[i], pkbuf->len, false);
+
+    ogs_assert(true == ogs_pfcp_up_handle_pdr(
+                pdr, OGS_GTPU_MSGTYPE_GPDU, NULL, pkbuf, &report));
+    return true;
+}
+
+/* Flood a DL broadcast/multicast L2 frame to every active Ethernet PDU session
+ * (TS 23.501 §5.8.2.5.3). Each session gets its own copy. Returns true if at
+ * least one Ethernet session was found (the caller then frees the original). */
+static bool upf_eth_dl_flood(ogs_pkbuf_t *pkbuf)
+{
+    upf_sess_t *sess = NULL;
+    bool any = false;
+
+    ogs_list_for_each(&upf_self()->sess_list, sess) {
+        ogs_pkbuf_t *clone = NULL;
+        if (!sess->correlation.ethernet)
+            continue;
+        any = true;
+        clone = ogs_pkbuf_copy(pkbuf);
+        if (!clone)
+            continue;
+        if (!upf_eth_dl_forward(sess, clone))
+            ogs_pkbuf_free(clone);
+    }
+    return any;
+}
+
 static void _gtpv1_tun_recv_common_cb(
         short when, ogs_socket_t fd, bool has_eth, void *data)
 {
@@ -143,6 +222,29 @@ static void _gtpv1_tun_recv_common_cb(
         ogs_pkbuf_t *replybuf = NULL;
         uint16_t eth_type = _get_eth_type(recvbuf->data, recvbuf->len);
         uint8_t size;
+
+        /* Phase 5 Step 4: NW-TT bridge DL ingress. The full L2 frame is intact
+         * (dst MAC | src MAC | ethertype | ...). Resolve the destination MAC to
+         * an Ethernet PDU session and GTP-U-encap the whole frame toward the
+         * gNB; flood broadcast/multicast to all Ethernet sessions. Only IP-over-
+         * TAP frames (no Ethernet PDU session) fall through to the ARP/ND/IP
+         * handling below. (TS 23.501 §5.6.10.2, §5.8.2.5.3.) */
+        if (recvbuf->len >= 2 * UPF_MAC_ALEN) {
+            const uint8_t *dst_mac = recvbuf->data;
+            bool group_addr = (dst_mac[0] & 0x01); /* broadcast or multicast */
+
+            if (!group_addr) {
+                upf_sess_t *esess = upf_sess_find_by_mac(dst_mac);
+                if (esess && esess->correlation.ethernet) {
+                    if (upf_eth_dl_forward(esess, recvbuf))
+                        return; /* recvbuf consumed by ogs_pfcp_up_handle_pdr() */
+                    goto cleanup;
+                }
+            } else {
+                if (upf_eth_dl_flood(recvbuf))
+                    goto cleanup; /* copies forwarded; free the original */
+            }
+        }
 
         if (eth_type == ETHERTYPE_ARP) {
             if (is_arp_req(recvbuf->data, recvbuf->len) &&
@@ -548,6 +650,28 @@ static void _gtpv1_u_recv_cb(short when, ogs_socket_t fd, void *data)
             ogs_info("[UPF] Ethernet UL class[%s] ethertype[0x%04x] QFI[%d] "
                      "SEID[0x%llx]", upf_eth_class_str(klass), inner_eth_type,
                      pdr->qfi, (unsigned long long)sess->upf_n4_seid);
+        }
+
+        /* Phase 5 Step 4: NW-TT bridge UL egress. For an Ethernet PDU session
+         * the GTP-U payload is the UE's raw L2 frame (no UE IP). Learn the inner
+         * source MAC for DL return traffic, then deliver the frame verbatim to
+         * the N6 TAP bridge port. (TS 23.501 §5.6.10.2, §5.8.2.5.3.) */
+        if (sess->correlation.ethernet) {
+            ogs_pfcp_dev_t *eth_dev = upf_eth_bridge_dev();
+
+            if (pkbuf->len >= 2 * UPF_MAC_ALEN)
+                upf_sess_learn_mac(sess, pkbuf->data + UPF_MAC_ALEN);
+
+            if (far->dst_if == OGS_PFCP_INTERFACE_CORE && eth_dev) {
+                for (i = 0; i < pdr->num_of_urr; i++)
+                    upf_sess_urr_acc_add(sess, pdr->urr[i], pkbuf->len, true);
+                if (ogs_tun_write(eth_dev->fd, pkbuf) != OGS_OK)
+                    ogs_warn("ogs_tun_write() (NW-TT UL) failed");
+            } else {
+                ogs_error("[DROP] Ethernet UL: no NW-TT TAP egress "
+                          "(dst_if[%d])", far->dst_if);
+            }
+            goto cleanup;
         }
 
         if (ip_h->ip_v == 4 && sess->ipv4) {

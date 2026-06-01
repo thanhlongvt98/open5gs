@@ -191,6 +191,11 @@ typedef struct ogs_pfcp_pdr_s {
 
     uint8_t                 qfi;
 
+    /* Ethernet PDU Session Information (TS 29.244 §8.2.117): ETHI flag set on
+     * the PDI so the UPF treats matched traffic as Ethernet PDU-session frames.
+     * Set on the DL PDR for an Ethernet PDU session. */
+    bool                    ethernet_pdu_session_information;
+
     ogs_pfcp_far_t          *far;
 
     int                     num_of_urr;

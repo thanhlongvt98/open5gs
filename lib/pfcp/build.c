@@ -428,6 +428,17 @@ void ogs_pfcp_build_create_pdr(
         message->pdi.qfi.u8 = pdr->qfi;
     }
 
+    if (pdr->ethernet_pdu_session_information) {
+        /* Ethernet PDU Session Information IE (TS 29.244 §8.2.117): a single
+         * octet whose bit 1 (ETHI) flags Ethernet PDU-session traffic. The data
+         * pointer must remain valid through ogs_pfcp_build_msg(), so reference a
+         * file-static constant. */
+        static const uint8_t ethi = 0x01;
+        message->pdi.ethernet_pdu_session_information.presence = 1;
+        message->pdi.ethernet_pdu_session_information.data = (void *)&ethi;
+        message->pdi.ethernet_pdu_session_information.len = sizeof(ethi);
+    }
+
     if (pdr->outer_header_removal_len) {
         message->outer_header_removal.presence = 1;
         message->outer_header_removal.data = &pdr->outer_header_removal;
