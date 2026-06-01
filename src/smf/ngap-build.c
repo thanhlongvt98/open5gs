@@ -19,6 +19,72 @@
 
 #include "ngap-build.h"
 
+/*
+ * Phase 6 Step 3: build one NGAP TSC Assistance Information (TS 38.413
+ * §9.3.1.131) from the SMF-local TSC context, for a single direction. Carries
+ * the mandatory Periodicity (5G-domain, µs), the optional Burst Arrival Time
+ * (only when the 5G-domain value exists — Phase 7), and the optional Survival
+ * Time extension (id 327) when present.
+ */
+static NGAP_TSCAssistanceInformation_t *smf_ngap_build_tsc_assistance(
+        const tsc_context_t *tsc)
+{
+    NGAP_TSCAssistanceInformation_t *tscai = NULL;
+    uint32_t periodicity_5g = 0;
+    uint64_t bat_5g = 0;
+    bool has_bat = false;
+
+    smf_sess_tsc_derive(tsc, &periodicity_5g, &bat_5g, &has_bat);
+
+    tscai = CALLOC(1, sizeof(NGAP_TSCAssistanceInformation_t));
+    ogs_assert(tscai);
+
+    /* Periodicity: INTEGER (0..640000), unit 1 µs (TS 38.413 §9.3.1.132). */
+    tscai->periodicity = (NGAP_Periodicity_t)periodicity_5g;
+
+    if (has_bat) {
+        /* Burst Arrival Time: OCTET STRING (ReferenceTime), already 5G-domain.
+         * 8-octet big-endian carrier; exact ReferenceTime formatting is
+         * finalized in Phase 7 when the value is first produced. */
+        uint8_t buf[8];
+        int i;
+        for (i = 7; i >= 0; i--) {
+            buf[i] = (uint8_t)(bat_5g & 0xff);
+            bat_5g >>= 8;
+        }
+        tscai->burstArrivalTime =
+            CALLOC(1, sizeof(NGAP_BurstArrivalTime_t));
+        ogs_assert(tscai->burstArrivalTime);
+        ogs_assert(OCTET_STRING_fromBuf(
+                tscai->burstArrivalTime, (const char *)buf, sizeof(buf)) == 0);
+    }
+
+    if (tsc->survival_time_us > 0) {
+        /* Survival Time extension (id 327) on the TSC Assistance Information. */
+        NGAP_ProtocolExtensionContainer_11905P339_t *extContainer = NULL;
+        NGAP_TSCAssistanceInformation_ExtIEs_t *extIe = NULL;
+
+        extContainer = CALLOC(1,
+                sizeof(NGAP_ProtocolExtensionContainer_11905P339_t));
+        ogs_assert(extContainer);
+        tscai->iE_Extensions =
+            (struct NGAP_ProtocolExtensionContainer *)extContainer;
+
+        extIe = CALLOC(1, sizeof(NGAP_TSCAssistanceInformation_ExtIEs_t));
+        ogs_assert(extIe);
+        ASN_SEQUENCE_ADD(&extContainer->list, extIe);
+
+        extIe->id = NGAP_ProtocolIE_ID_id_SurvivalTime;
+        extIe->criticality = NGAP_Criticality_ignore;
+        extIe->extensionValue.present =
+            NGAP_TSCAssistanceInformation_ExtIEs__extensionValue_PR_SurvivalTime;
+        extIe->extensionValue.choice.SurvivalTime =
+            (NGAP_SurvivalTime_t)tsc->survival_time_us;
+    }
+
+    return tscai;
+}
+
 ogs_pkbuf_t *ngap_build_pdu_session_resource_setup_request_transfer(
         smf_sess_t *sess)
 {
@@ -290,6 +356,49 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_setup_request_transfer(
                     (long long)qos_flow->qos.gbr.downlink,
                     (long long)qos_flow->qos.gbr.uplink);
             }
+        }
+
+        /* Phase 6 Step 3: attach TSC Traffic Characteristics (id 196) on this
+         * QoS Flow Setup Request Item when the session carries TSC assistance
+         * for this QFI. Direction selects the DL/UL sub-IE(s). The gNB decodes
+         * the IE (RAN consumption is Phase 3); baseline flows add nothing. */
+        if (sess->tsc && sess->tsc->status != TSC_STATUS_ABSENT &&
+                qos_flow->qfi == sess->tsc->qfi) {
+            NGAP_ProtocolExtensionContainer_11905P280_t *tscExtContainer = NULL;
+            NGAP_QosFlowSetupRequestItem_ExtIEs_t *tscExtIe = NULL;
+            NGAP_TSCTrafficCharacteristics_t *TSCTrafficCharacteristics = NULL;
+
+            tscExtContainer = CALLOC(1,
+                    sizeof(NGAP_ProtocolExtensionContainer_11905P280_t));
+            ogs_assert(tscExtContainer);
+            QosFlowSetupRequestItem->iE_Extensions =
+                (struct NGAP_ProtocolExtensionContainer *)tscExtContainer;
+
+            tscExtIe = CALLOC(1, sizeof(NGAP_QosFlowSetupRequestItem_ExtIEs_t));
+            ogs_assert(tscExtIe);
+            ASN_SEQUENCE_ADD(&tscExtContainer->list, tscExtIe);
+
+            tscExtIe->id = NGAP_ProtocolIE_ID_id_TSCTrafficCharacteristics;
+            tscExtIe->criticality = NGAP_Criticality_ignore;
+            tscExtIe->extensionValue.present =
+                NGAP_QosFlowSetupRequestItem_ExtIEs__extensionValue_PR_TSCTrafficCharacteristics;
+
+            TSCTrafficCharacteristics =
+                &tscExtIe->extensionValue.choice.TSCTrafficCharacteristics;
+
+            if (sess->tsc->direction == TSC_DL ||
+                    sess->tsc->direction == TSC_BOTH)
+                TSCTrafficCharacteristics->tSCAssistanceInformationDL =
+                    smf_ngap_build_tsc_assistance(sess->tsc);
+            if (sess->tsc->direction == TSC_UL ||
+                    sess->tsc->direction == TSC_BOTH)
+                TSCTrafficCharacteristics->tSCAssistanceInformationUL =
+                    smf_ngap_build_tsc_assistance(sess->tsc);
+
+            ogs_info("[SMF] NGAP TSC Traffic Characteristics encoded: "
+                     "QFI[%d] dir[%d] periodicity[%llu us]",
+                     qos_flow->qfi, sess->tsc->direction,
+                     (unsigned long long)sess->tsc->periodicity_us);
         }
     }
 

@@ -41,3 +41,20 @@ void smf_sess_tsc_remove(smf_sess_t *sess)
         sess->tsc = NULL;
     }
 }
+
+void smf_sess_tsc_derive(const tsc_context_t *tsc,
+        uint32_t *periodicity_5g, uint64_t *bat_5g, bool *has_bat)
+{
+    ogs_assert(tsc);
+    ogs_assert(periodicity_5g);
+    ogs_assert(bat_5g);
+    ogs_assert(has_bat);
+
+    /* rateRatio = 1 (single grandmaster): periodicity passes through. */
+    *periodicity_5g = (uint32_t)tsc->periodicity_us;
+
+    /* Burst arrival time is encoded only once the 5G-domain value exists
+     * (Phase-7 clock conversion). The raw TSN-domain value is never emitted. */
+    *has_bat = (tsc->burst_arrival_time_5g != 0);
+    *bat_5g = tsc->burst_arrival_time_5g;
+}
