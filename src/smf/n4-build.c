@@ -79,6 +79,18 @@ ogs_pkbuf_t *smf_n4_build_session_establishment_request(
     req->cp_f_seid.data = &f_seid;
     req->cp_f_seid.len = len;
 
+    /* 202606 Step 02: request a 5GS-TSN-bridge port for an Ethernet PDU session
+     * (TS 29.244 create_bridge_info_for_tsc, IE 194). The single octet carries
+     * the BII (Bridge Information Indication) flag; the UPF replies with the
+     * assigned DS-TT port in created_bridge_info_for_tsc. */
+    if (sess->session.session_type == OGS_PDU_SESSION_TYPE_ETHERNET) {
+        static const uint8_t bii = 0x01; /* BII flag; valid through build_msg */
+        sess->tsc_bridge.bridge = true;
+        req->create_bridge_info_for_tsc.presence = 1;
+        req->create_bridge_info_for_tsc.data = (void *)&bii;
+        req->create_bridge_info_for_tsc.len = sizeof(bii);
+    }
+
     ogs_pfcp_pdrbuf_init();
 
     /* Create PDR */

@@ -516,6 +516,15 @@ typedef struct smf_sess_s {
      * when TSC assistance arrives (Step 2). Freed in smf_sess_remove(). */
     tsc_context_t   *tsc;
 
+    /* 202606 Step 02: 5GS-TSN-bridge port state (TS 29.244 create/created
+     * bridge info for TSC). Set when the SMF requests a bridge port at PFCP
+     * establishment and the UPF returns the DS-TT port number. */
+    struct {
+        bool        bridge;       /* create_bridge_info_for_tsc was requested */
+        uint32_t    ds_tt_port;   /* assigned by the UPF (created_bridge_info) */
+        uint32_t    nw_tt_port;   /* NW-TT port (from PMIC, 202606 Step 07)    */
+    } tsc_bridge;
+
     ogs_pool_id_t smf_ue_id;
 
     bool n1_released;

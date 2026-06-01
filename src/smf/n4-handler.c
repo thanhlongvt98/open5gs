@@ -184,6 +184,19 @@ uint8_t smf_5gc_n4_handle_session_establishment_response(
     if (cause_value != OGS_PFCP_CAUSE_REQUEST_ACCEPTED)
         return cause_value;
 
+    /* 202606 Step 02: ingest the assigned DS-TT port number from the UPF's
+     * created_bridge_info_for_tsc (TS 29.244, 4-octet big-endian). */
+    if (sess->tsc_bridge.bridge &&
+            rsp->created_bridge_info_for_tsc.presence &&
+            rsp->created_bridge_info_for_tsc.ds_tt_port_number.presence) {
+        ogs_pfcp_tlv_ds_tt_port_number_t *p =
+            &rsp->created_bridge_info_for_tsc.ds_tt_port_number;
+        if (p->len >= sizeof(uint32_t))
+            sess->tsc_bridge.ds_tt_port = be32toh(*(uint32_t *)p->data);
+        ogs_info("[SMF] 5GS-TSN bridge: DS-TT port[%u] (PSI[%d])",
+                sess->tsc_bridge.ds_tt_port, sess->psi);
+    }
+
     for (i = 0; i < OGS_MAX_NUM_OF_PDR; i++) {
         pdr = ogs_pfcp_handle_created_pdr(
                 &sess->pfcp, &rsp->created_pdr[i],
