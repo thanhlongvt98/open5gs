@@ -133,6 +133,16 @@ typedef struct upf_sess_s {
         bool    ethernet;      /* session_type == OGS_PDU_SESSION_TYPE_ETHERNET */
         uint8_t session_type;  /* OGS_PDU_SESSION_TYPE_* seen at N4 establishment */
     } correlation;
+
+    /* NW-TT bridge-port state from the standard PFCP TSC IEs (Phase 5 Step 3).
+     * Populated only when the SMF sends create_bridge_info_for_tsc / a PMIC over
+     * N4 (TS 29.244). UPF-local (Issue 5-A); the shared lib/pfcp is unchanged. */
+    struct {
+        bool     bridge;             /* create_bridge_info_for_tsc was received */
+        uint32_t ds_tt_port_number;  /* assigned per PDU session (this DS-TT port) */
+        bool     pmic_present;       /* a PMIC (PSFP tables) has been received */
+        uint32_t pmic_len;           /* length of the last PMIC (octets) */
+    } nwtt;
 } upf_sess_t;
 
 void upf_context_init(void);
@@ -158,6 +168,9 @@ uint8_t upf_sess_set_ue_ip(upf_sess_t *sess,
 /* Phase 5 Step 1: record the PDU session type as UPF-local correlation state
  * (logs the creation for an Ethernet PDU session). */
 void upf_sess_set_correlation(upf_sess_t *sess, uint8_t session_type);
+/* Phase 5 Step 3: assign a DS-TT port number for a 5GS-TSN-bridge PDU session
+ * (returned in the PFCP created_bridge_info_for_tsc IE). Monotonic, >= 1. */
+uint32_t upf_sess_assign_dstt_port(void);
 uint8_t upf_sess_set_ue_ipv4_framed_routes(upf_sess_t *sess,
         char *framed_routes[]);
 uint8_t upf_sess_set_ue_ipv6_framed_routes(upf_sess_t *sess,

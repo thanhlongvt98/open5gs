@@ -214,6 +214,18 @@ void upf_n4_handle_session_establishment_request(
     if (req->pdn_type.presence == 1)
         upf_sess_set_correlation(sess, req->pdn_type.u8);
 
+    /* Phase 5 Step 3: the SMF requests creation of this session's 5GS-TSN-bridge
+     * port via the standard PFCP create_bridge_info_for_tsc IE (TS 29.244). Assign
+     * a DS-TT port number; it is returned in created_bridge_info_for_tsc in the
+     * establishment response (see upf_n4_build_session_establishment_response). */
+    if (req->create_bridge_info_for_tsc.presence) {
+        sess->nwtt.bridge = true;
+        sess->nwtt.ds_tt_port_number = upf_sess_assign_dstt_port();
+        ogs_info("[UPF] NW-TT bridge port created: DS-TT port[%u] (SMF-SEID[0x%llx])",
+                 sess->nwtt.ds_tt_port_number,
+                 (unsigned long long)sess->smf_n4_f_seid.seid);
+    }
+
     /* Send Buffered Packet to gNB/SGW */
     ogs_list_for_each(&sess->pfcp.pdr_list, pdr) {
         if (pdr->src_if == OGS_PFCP_INTERFACE_CORE) { /* Downlink */
@@ -267,6 +279,21 @@ void upf_n4_handle_session_modification_request(
                 OGS_PFCP_SESSION_MODIFICATION_RESPONSE_TYPE,
                 OGS_PFCP_CAUSE_SESSION_CONTEXT_NOT_FOUND, 0);
         return;
+    }
+
+    /* Phase 5 Step 3: the SMF carries the NW-TT Port Management Information
+     * Container (PMIC = the CNC's PSFP stream filter/gate tables) inside the
+     * standard PFCP tsc_management_information IE (TS 29.244). Record receipt;
+     * parsing/enforcing the PSFP tables is deferred to a later step. */
+    if (req->tsc_management_information.presence) {
+        ogs_pfcp_tlv_port_management_information_container_t *pmic =
+            &req->tsc_management_information.port_management_information_container;
+        if (pmic->presence) {
+            sess->nwtt.pmic_present = true;
+            sess->nwtt.pmic_len = pmic->len;
+            ogs_info("[UPF] NW-TT PMIC received: %u octets (DS-TT port[%u]) "
+                     "— PSFP apply deferred", pmic->len, sess->nwtt.ds_tt_port_number);
+        }
     }
 
     for (i = 0; i < OGS_MAX_NUM_OF_PDR; i++) {

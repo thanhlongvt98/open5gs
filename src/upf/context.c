@@ -524,6 +524,15 @@ void upf_sess_set_correlation(upf_sess_t *sess, uint8_t session_type)
                  sess->apn_dnn ? sess->apn_dnn : "");
 }
 
+uint32_t upf_sess_assign_dstt_port(void)
+{
+    /* Monotonic DS-TT port allocator for 5GS-TSN-bridge PDU sessions. Port
+     * numbers must be unique within the bridge and stable per session; a simple
+     * counter satisfies that for the NW-TT. Starts at 1 (0 = unassigned). */
+    static uint32_t next_dstt_port = 1;
+    return next_dstt_port++;
+}
+
 /* Remove amd free framed ROUTE from TRIE. It isn't an error if the framed
    route doesn't exist in TRIE. */
 static void free_framed_route_from_trie(ogs_ipsubnet_t *route)

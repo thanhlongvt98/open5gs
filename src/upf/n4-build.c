@@ -32,6 +32,7 @@ ogs_pkbuf_t *upf_n4_build_session_establishment_response(uint8_t type,
     ogs_pfcp_node_id_t node_id;
     ogs_pfcp_f_seid_t f_seid;
     int len = 0;
+    uint32_t ds_tt_be = 0; /* big-endian DS-TT port; must outlive ogs_pfcp_build_msg() */
 
     ogs_debug("Session Establishment Response");
 
@@ -59,6 +60,17 @@ ogs_pkbuf_t *upf_n4_build_session_establishment_response(uint8_t type,
     rsp->up_f_seid.presence = 1;
     rsp->up_f_seid.data = &f_seid;
     rsp->up_f_seid.len = len;
+
+    /* Phase 5 Step 3: when the SMF requested a 5GS-TSN-bridge port for this
+     * session, return the assigned DS-TT port number in the standard PFCP
+     * created_bridge_info_for_tsc IE (TS 29.244). 4-octet big-endian. */
+    if (sess->nwtt.bridge) {
+        ds_tt_be = htobe32(sess->nwtt.ds_tt_port_number);
+        rsp->created_bridge_info_for_tsc.presence = 1;
+        rsp->created_bridge_info_for_tsc.ds_tt_port_number.presence = 1;
+        rsp->created_bridge_info_for_tsc.ds_tt_port_number.data = &ds_tt_be;
+        rsp->created_bridge_info_for_tsc.ds_tt_port_number.len = sizeof(ds_tt_be);
+    }
 
     ogs_pfcp_pdrbuf_init();
 
