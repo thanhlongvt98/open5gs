@@ -596,6 +596,13 @@ void smf_qos_flow_binding(smf_sess_t *sess)
 
                 memcpy(&qos_flow->qos, &pcc_rule->qos, sizeof(ogs_qos_t));
 
+                /* Phase 6 Step 2: bind the SMF-local TSC context to the TSC
+                 * flow's QFI. One TSC context per session (Step-1 model), so
+                 * the first QoS flow created for a TSC-assisted session carries
+                 * the binding; multi-flow-per-session TSC is out of scope. */
+                if (sess->tsc && sess->tsc->qfi == 0)
+                    sess->tsc->qfi = qos_flow->qfi;
+
                 qos_flow_created = true;
 
             } else {

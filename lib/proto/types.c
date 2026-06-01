@@ -1166,5 +1166,10 @@ int ogs_pcc_rule_update_qos_from_media(
     if (pcc_rule->qos.gbr.uplink == 0)
         pcc_rule->qos.gbr.uplink = pcc_rule->qos.mbr.uplink;
 
+    /* Phase 6: carry TSCAI assistance from the media component onto the PCC
+     * rule, so it is emitted on the SmPolicyDecision toward the SMF. */
+    pcc_rule->tscai_input_dl = media_component->tscai_input_dl;
+    pcc_rule->tscai_input_ul = media_component->tscai_input_ul;
+
     return OGS_OK;
 }

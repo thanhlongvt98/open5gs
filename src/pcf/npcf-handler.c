@@ -770,6 +770,43 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
                         ogs_sbi_bitrate_from_string(MediaComponent->rs_bw);
                 media_component->flow_status = MediaComponent->f_status;
 
+                /* Phase 6: capture the AF's TSCAI input containers (TS 29.514)
+                 * into the internal media component so they are carried onto
+                 * the PCC rule and emitted toward the SMF on the
+                 * SmPolicyDecision. */
+                if (MediaComponent->tscai_input_dl &&
+                        !MediaComponent->is_tscai_input_dl_null) {
+                    OpenAPI_tscai_input_container_t *Tin =
+                        MediaComponent->tscai_input_dl;
+                    ogs_tscai_input_t *tdl = &media_component->tscai_input_dl;
+                    tdl->present = true;
+                    tdl->is_periodicity = Tin->is_periodicity;
+                    tdl->periodicity = Tin->periodicity;
+                    if (Tin->burst_arrival_time)
+                        ogs_cpystrn(tdl->burst_arrival_time,
+                                Tin->burst_arrival_time, OGS_TSCAI_BAT_STR_LEN);
+                    tdl->is_sur_time_in_num_msg = Tin->is_sur_time_in_num_msg;
+                    tdl->sur_time_in_num_msg = Tin->sur_time_in_num_msg;
+                    tdl->is_sur_time_in_time = Tin->is_sur_time_in_time;
+                    tdl->sur_time_in_time = Tin->sur_time_in_time;
+                }
+                if (MediaComponent->tscai_input_ul &&
+                        !MediaComponent->is_tscai_input_ul_null) {
+                    OpenAPI_tscai_input_container_t *Tin =
+                        MediaComponent->tscai_input_ul;
+                    ogs_tscai_input_t *tul = &media_component->tscai_input_ul;
+                    tul->present = true;
+                    tul->is_periodicity = Tin->is_periodicity;
+                    tul->periodicity = Tin->periodicity;
+                    if (Tin->burst_arrival_time)
+                        ogs_cpystrn(tul->burst_arrival_time,
+                                Tin->burst_arrival_time, OGS_TSCAI_BAT_STR_LEN);
+                    tul->is_sur_time_in_num_msg = Tin->is_sur_time_in_num_msg;
+                    tul->sur_time_in_num_msg = Tin->sur_time_in_num_msg;
+                    tul->is_sur_time_in_time = Tin->is_sur_time_in_time;
+                    tul->sur_time_in_time = Tin->sur_time_in_time;
+                }
+
                 SubComponentList = MediaComponent->med_sub_comps;
                 OpenAPI_list_for_each(SubComponentList, node2) {
                     if (media_component->num_of_sub >=
@@ -1243,6 +1280,43 @@ bool pcf_npcf_policyauthorization_handle_update(
                     media_component->rs_bandwidth =
                         ogs_sbi_bitrate_from_string(MediaComponent->rs_bw);
                 media_component->flow_status = MediaComponent->f_status;
+
+                /* Phase 6: capture the AF's TSCAI input containers (TS 29.514)
+                 * into the internal media component so they are carried onto
+                 * the PCC rule and emitted toward the SMF on the
+                 * SmPolicyDecision. */
+                if (MediaComponent->tscai_input_dl &&
+                        !MediaComponent->is_tscai_input_dl_null) {
+                    OpenAPI_tscai_input_container_t *Tin =
+                        MediaComponent->tscai_input_dl;
+                    ogs_tscai_input_t *tdl = &media_component->tscai_input_dl;
+                    tdl->present = true;
+                    tdl->is_periodicity = Tin->is_periodicity;
+                    tdl->periodicity = Tin->periodicity;
+                    if (Tin->burst_arrival_time)
+                        ogs_cpystrn(tdl->burst_arrival_time,
+                                Tin->burst_arrival_time, OGS_TSCAI_BAT_STR_LEN);
+                    tdl->is_sur_time_in_num_msg = Tin->is_sur_time_in_num_msg;
+                    tdl->sur_time_in_num_msg = Tin->sur_time_in_num_msg;
+                    tdl->is_sur_time_in_time = Tin->is_sur_time_in_time;
+                    tdl->sur_time_in_time = Tin->sur_time_in_time;
+                }
+                if (MediaComponent->tscai_input_ul &&
+                        !MediaComponent->is_tscai_input_ul_null) {
+                    OpenAPI_tscai_input_container_t *Tin =
+                        MediaComponent->tscai_input_ul;
+                    ogs_tscai_input_t *tul = &media_component->tscai_input_ul;
+                    tul->present = true;
+                    tul->is_periodicity = Tin->is_periodicity;
+                    tul->periodicity = Tin->periodicity;
+                    if (Tin->burst_arrival_time)
+                        ogs_cpystrn(tul->burst_arrival_time,
+                                Tin->burst_arrival_time, OGS_TSCAI_BAT_STR_LEN);
+                    tul->is_sur_time_in_num_msg = Tin->is_sur_time_in_num_msg;
+                    tul->sur_time_in_num_msg = Tin->sur_time_in_num_msg;
+                    tul->is_sur_time_in_time = Tin->is_sur_time_in_time;
+                    tul->sur_time_in_time = Tin->sur_time_in_time;
+                }
 
                 SubComponentList = MediaComponent->med_sub_comps;
                 OpenAPI_list_for_each(SubComponentList, node2) {

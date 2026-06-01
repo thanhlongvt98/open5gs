@@ -1523,6 +1523,30 @@ OpenAPI_pcc_rule_t *ogs_sbi_build_pcc_rule(
             OpenAPI_list_free(FlowInformationList);
     }
 
+    /* Phase 6: emit the standard TSCAI input containers (TS 29.512) when the
+     * PCC rule carries TSC assistance. The OpenAPI container owns the strdup'd
+     * burst_arrival_time string. */
+    if (pcc_rule->tscai_input_dl.present) {
+        ogs_tscai_input_t *t = &pcc_rule->tscai_input_dl;
+        PccRule->tscai_input_dl = OpenAPI_tscai_input_container_create(
+                t->is_periodicity, t->periodicity,
+                t->burst_arrival_time[0] ? ogs_strdup(t->burst_arrival_time) :
+                    NULL,
+                t->is_sur_time_in_num_msg, t->sur_time_in_num_msg,
+                t->is_sur_time_in_time, t->sur_time_in_time);
+        ogs_assert(PccRule->tscai_input_dl);
+    }
+    if (pcc_rule->tscai_input_ul.present) {
+        ogs_tscai_input_t *t = &pcc_rule->tscai_input_ul;
+        PccRule->tscai_input_ul = OpenAPI_tscai_input_container_create(
+                t->is_periodicity, t->periodicity,
+                t->burst_arrival_time[0] ? ogs_strdup(t->burst_arrival_time) :
+                    NULL,
+                t->is_sur_time_in_num_msg, t->sur_time_in_num_msg,
+                t->is_sur_time_in_time, t->sur_time_in_time);
+        ogs_assert(PccRule->tscai_input_ul);
+    }
+
     return PccRule;
 }
 
@@ -1542,6 +1566,11 @@ void ogs_sbi_free_pcc_rule(OpenAPI_pcc_rule_t *PccRule)
         }
         OpenAPI_list_free(PccRule->flow_infos);
     }
+    /* Phase 6: free the TSCAI containers built in ogs_sbi_build_pcc_rule(). */
+    if (PccRule->tscai_input_dl)
+        OpenAPI_tscai_input_container_free(PccRule->tscai_input_dl);
+    if (PccRule->tscai_input_ul)
+        OpenAPI_tscai_input_container_free(PccRule->tscai_input_ul);
     ogs_free(PccRule);
 }
 

@@ -534,6 +534,24 @@ typedef struct ogs_flow_s {
     } while(0)
 
 /**********************************
+ * TSCAI input container (TS 29.512 TscaiInputContainer / TS 23.501 Table
+ * 5.27.2-1). Internal POD mirror of OpenAPI_tscai_input_container_t carried on
+ * the PCC rule and media component. No heap members so the PCC store/free
+ * macros need no special handling. Phase 6.
+ */
+#define OGS_TSCAI_BAT_STR_LEN 48
+typedef struct ogs_tscai_input_s {
+    bool        present;
+    bool        is_periodicity;
+    uint32_t    periodicity;        /* microseconds */
+    char        burst_arrival_time[OGS_TSCAI_BAT_STR_LEN]; /* TS 29.571 string */
+    bool        is_sur_time_in_num_msg;
+    uint32_t    sur_time_in_num_msg;
+    bool        is_sur_time_in_time;
+    uint32_t    sur_time_in_time;   /* microseconds */
+} ogs_tscai_input_t;
+
+/**********************************
  * TS29.212
  * Ch 5.3.2 Charging-Rule-Install AVP
  *
@@ -555,6 +573,10 @@ typedef struct ogs_pcc_rule_s {
     uint32_t rating_group;
 
     ogs_qos_t  qos;
+
+    /* Phase 6: TSCAI assistance carried on the PCC rule (TS 29.512). */
+    ogs_tscai_input_t tscai_input_dl;
+    ogs_tscai_input_t tscai_input_ul;
 } ogs_pcc_rule_t;
 
 #define OGS_STORE_PCC_RULE(__dST, __sRC) \
@@ -583,6 +605,8 @@ typedef struct ogs_pcc_rule_s {
         (__dST)->flow_status = (__sRC)->flow_status; \
         (__dST)->precedence = (__sRC)->precedence; \
         memcpy(&(__dST)->qos, &(__sRC)->qos, sizeof(ogs_qos_t)); \
+        (__dST)->tscai_input_dl = (__sRC)->tscai_input_dl; \
+        (__dST)->tscai_input_ul = (__sRC)->tscai_input_ul; \
     } while(0)
 
 #define OGS_PCC_RULE_FREE(__pCCrULE) \
@@ -953,6 +977,10 @@ typedef struct ogs_media_component_s {
 #define OGS_MAX_NUM_OF_MEDIA_SUB_COMPONENT     8
     ogs_media_sub_component_t sub[OGS_MAX_NUM_OF_MEDIA_SUB_COMPONENT];
     int                 num_of_sub;
+
+    /* Phase 6: TSCAI assistance from the AF MediaComponent (TS 29.514). */
+    ogs_tscai_input_t   tscai_input_dl;
+    ogs_tscai_input_t   tscai_input_ul;
 } ogs_media_component_t;
 
 #define OGS_MAX_NUM_OF_SPT 20

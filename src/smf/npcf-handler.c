@@ -24,6 +24,65 @@
 
 #include "npcf-handler.h"
 
+/* Phase 6 Step 2: ingest the standard TSCAI input containers from a PCC rule
+ * (TS 29.512) into the SMF-local TSC context (Step 1). Direction is implicit in
+ * DL vs UL container presence (TS 23.501 Table 5.27.2-1). Clock conversion of
+ * the burst arrival time is deferred (Phase 7); the raw value is stored as the
+ * TSN-clock field. */
+static void smf_tsc_ingest_pcc_rule(
+        smf_sess_t *sess, OpenAPI_pcc_rule_t *PccRule)
+{
+    OpenAPI_tscai_input_container_t *dl = NULL, *ul = NULL, *t = NULL;
+    tsc_context_t *tsc = NULL;
+
+    ogs_assert(sess);
+    ogs_assert(PccRule);
+
+    if (PccRule->tscai_input_dl && !PccRule->is_tscai_input_dl_null)
+        dl = PccRule->tscai_input_dl;
+    if (PccRule->tscai_input_ul && !PccRule->is_tscai_input_ul_null)
+        ul = PccRule->tscai_input_ul;
+
+    if (!dl && !ul)
+        return; /* no TSC assistance on this rule -> baseline, sess->tsc NULL */
+
+    tsc = smf_sess_tsc_add(sess);
+    if (!tsc)
+        return;
+
+    /* Timing is read from whichever container is present (prefer DL). */
+    t = dl ? dl : ul;
+
+    if (t->is_periodicity)
+        tsc->periodicity_us = (uint64_t)t->periodicity;
+    if (t->is_sur_time_in_time)
+        tsc->survival_time_us = (uint32_t)t->sur_time_in_time;
+    if (t->burst_arrival_time)
+        tsc->burst_arrival_time_tsn =
+            (uint64_t)strtoull(t->burst_arrival_time, NULL, 0);
+    /* burst_arrival_time_5g left 0: TSN->5G clock conversion deferred (Phase 7) */
+
+    if (dl && ul)
+        tsc->direction = TSC_BOTH;
+    else if (dl)
+        tsc->direction = TSC_DL;
+    else
+        tsc->direction = TSC_UL;
+
+    /* ACTIVE only when the core TSCAI fields (periodicity + burst arrival time)
+     * are present; otherwise the hint is PARTIAL (downgrade is Step 4). */
+    if (t->is_periodicity && t->burst_arrival_time)
+        tsc->status = TSC_STATUS_ACTIVE;
+    else
+        tsc->status = TSC_STATUS_PARTIAL;
+
+    ogs_info("[SMF] TSC ingest: PSI[%d] dir[%d] periodicity[%llu us] "
+             "survival[%u us] status[%d]",
+             sess->psi, tsc->direction,
+             (unsigned long long)tsc->periodicity_us,
+             tsc->survival_time_us, tsc->status);
+}
+
 static void update_authorized_pcc_rule_and_qos(
         smf_sess_t *sess, OpenAPI_sm_policy_decision_t *SmPolicyDecision)
 {
@@ -265,6 +324,10 @@ static void update_authorized_pcc_rule_and_qos(
                 if (pcc_rule->qos.gbr.uplink == 0)
                     pcc_rule->qos.gbr.uplink = MAX_BIT_RATE;
             }
+
+            /* Phase 6 Step 2: ingest TSCAI from this PCC rule into the
+             * SMF-local TSC context. */
+            smf_tsc_ingest_pcc_rule(sess, PccRule);
 
             sess->policy.num_of_pcc_rule++;
         }
