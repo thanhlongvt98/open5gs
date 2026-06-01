@@ -338,6 +338,31 @@ static void update_authorized_pcc_rule_and_qos(
             sess->policy.num_of_pcc_rule++;
         }
     }
+
+    /* 202606 Step 06: ingest the per-port PMIC containers the AF pushed
+     * (SmPolicyDecision.tsn_port_man_cont_*, TS 29.512) into SMF-local bridge
+     * state, to be built down to the TTs over N4 (NW-TT) and N1 (DS-TT). */
+    if (SmPolicyDecision->tsn_port_man_cont_dstt &&
+            SmPolicyDecision->tsn_port_man_cont_dstt->port_man_cont) {
+        if (sess->tsc_bridge.dstt_pmic)
+            ogs_free(sess->tsc_bridge.dstt_pmic);
+        sess->tsc_bridge.dstt_pmic = ogs_strdup(
+                SmPolicyDecision->tsn_port_man_cont_dstt->port_man_cont);
+        ogs_info("[SMF] TSC DS-TT PMIC received (PSI[%d])", sess->psi);
+    }
+    if (SmPolicyDecision->tsn_port_man_cont_nwtts &&
+            SmPolicyDecision->tsn_port_man_cont_nwtts->first) {
+        OpenAPI_port_management_container_t *nwtt =
+            SmPolicyDecision->tsn_port_man_cont_nwtts->first->data;
+        if (nwtt && nwtt->port_man_cont) {
+            if (sess->tsc_bridge.nwtt_pmic)
+                ogs_free(sess->tsc_bridge.nwtt_pmic);
+            sess->tsc_bridge.nwtt_pmic = ogs_strdup(nwtt->port_man_cont);
+            sess->tsc_bridge.nw_tt_port = nwtt->port_num;
+            ogs_info("[SMF] TSC NW-TT PMIC received: port[%d] (PSI[%d])",
+                    nwtt->port_num, sess->psi);
+        }
+    }
 }
 
 bool smf_npcf_smpolicycontrol_handle_create(

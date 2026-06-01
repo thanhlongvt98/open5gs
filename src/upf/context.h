@@ -158,6 +158,7 @@ typedef struct upf_sess_s {
         uint32_t ds_tt_port_number;  /* assigned per PDU session (this DS-TT port) */
         bool     pmic_present;       /* a PMIC (PSFP tables) has been received */
         uint32_t pmic_len;           /* length of the last PMIC (octets) */
+        void    *pmic;               /* 202606 Step 08: programmed PMIC blob   */
     } nwtt;
 } upf_sess_t;
 

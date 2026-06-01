@@ -522,7 +522,12 @@ typedef struct smf_sess_s {
     struct {
         bool        bridge;       /* create_bridge_info_for_tsc was requested */
         uint32_t    ds_tt_port;   /* assigned by the UPF (created_bridge_info) */
-        uint32_t    nw_tt_port;   /* NW-TT port (from PMIC, 202606 Step 07)    */
+        uint32_t    nw_tt_port;   /* NW-TT port (from the AF PMIC, Step 06)    */
+        /* 202606 Step 06/07: per-port PMIC (port management info container)
+         * received from the AF (N5->PCF->SMF) to push down to the TTs. Opaque
+         * managed-object blobs; freed in smf_sess_remove(). */
+        char       *dstt_pmic;    /* DS-TT PMIC -> N1 NAS (TS 24.501 9.11.4.27)*/
+        char       *nwtt_pmic;    /* NW-TT PMIC -> N4 PFCP (TS 29.244)         */
     } tsc_bridge;
 
     ogs_pool_id_t smf_ue_id;

@@ -313,6 +313,26 @@ ogs_pkbuf_t *smf_n4_build_pdr_to_modify_list(
         i++;
     }
 
+    /* 202606 Step 07: deliver the NW-TT PMIC to the UPF over N4 (TS 29.244
+     * tsc_management_information). port_management_information_container is the
+     * opaque managed-object blob; nw_tt_port_number is 4-octet big-endian. */
+    if (sess->tsc_bridge.nwtt_pmic) {
+        static uint32_t nw_tt_be; /* valid through ogs_pfcp_build_msg() */
+        nw_tt_be = htobe32(sess->tsc_bridge.nw_tt_port);
+        req->tsc_management_information.presence = 1;
+        req->tsc_management_information.
+            port_management_information_container.presence = 1;
+        req->tsc_management_information.
+            port_management_information_container.data =
+                sess->tsc_bridge.nwtt_pmic;
+        req->tsc_management_information.
+            port_management_information_container.len =
+                strlen(sess->tsc_bridge.nwtt_pmic);
+        req->tsc_management_information.nw_tt_port_number.presence = 1;
+        req->tsc_management_information.nw_tt_port_number.data = &nw_tt_be;
+        req->tsc_management_information.nw_tt_port_number.len = sizeof(nw_tt_be);
+    }
+
     pfcp_message->h.type = type;
     pkbuf = ogs_pfcp_build_msg(pfcp_message);
     ogs_expect(pkbuf);

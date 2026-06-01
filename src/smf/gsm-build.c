@@ -499,6 +499,18 @@ ogs_pkbuf_t *gsm_build_pdu_session_modification_command(
             OGS_NAS_5GS_PDU_SESSION_MODIFICATION_COMMAND_AUTHORIZED_QOS_FLOW_DESCRIPTIONS_PRESENT;
     }
 
+    /* 202606 Step 07: deliver the DS-TT PMIC to the UE over N1 (TS 24.501
+     * §9.11.4.27, IEI 0x74). Opaque managed-object blob from the AF/CNC. */
+    if (sess->tsc_bridge.dstt_pmic) {
+        ogs_nas_port_management_information_container_t *pmic =
+            &pdu_session_modification_command->
+                port_management_information_container;
+        pmic->length = strlen(sess->tsc_bridge.dstt_pmic);
+        pmic->buffer = sess->tsc_bridge.dstt_pmic;
+        pdu_session_modification_command->presencemask |=
+            OGS_NAS_5GS_PDU_SESSION_MODIFICATION_COMMAND_PORT_MANAGEMENT_INFORMATION_CONTAINER_PRESENT;
+    }
+
     pkbuf = ogs_nas_5gs_plain_encode(&message);
     ogs_assert(pkbuf);
 

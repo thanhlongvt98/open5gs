@@ -247,6 +247,10 @@ int upf_sess_remove(upf_sess_t *sess)
         ogs_pfcp_ue_ip_free(sess->ipv6);
     }
 
+    /* 202606 Step 08: free the programmed NW-TT PMIC blob. */
+    if (sess->nwtt.pmic)
+        ogs_free(sess->nwtt.pmic);
+
     /* Evict any MACs this Ethernet PDU session learned from the bridge table. */
     if (ogs_list_first(&sess->mac_list)) {
         upf_sess_mac_t *mac_entry = NULL, *mac_next = NULL;

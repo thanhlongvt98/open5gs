@@ -289,10 +289,23 @@ void upf_n4_handle_session_modification_request(
         ogs_pfcp_tlv_port_management_information_container_t *pmic =
             &req->tsc_management_information.port_management_information_container;
         if (pmic->presence) {
+            /* 202606 Step 08: program the NW-TT port — store the PMIC managed
+             * object (PSFP stream filter + gate-control list). Best-effort:
+             * the blob is retained on the port for the data-path to consult;
+             * hard gate enforcement is a later refinement. */
             sess->nwtt.pmic_present = true;
             sess->nwtt.pmic_len = pmic->len;
-            ogs_info("[UPF] NW-TT PMIC received: %u octets (DS-TT port[%u]) "
-                     "— PSFP apply deferred", pmic->len, sess->nwtt.ds_tt_port_number);
+            if (sess->nwtt.pmic)
+                ogs_free(sess->nwtt.pmic);
+            sess->nwtt.pmic = ogs_calloc(1, pmic->len + 1);
+            if (sess->nwtt.pmic && pmic->data)
+                memcpy(sess->nwtt.pmic, pmic->data, pmic->len);
+            ogs_info("[UPF] NW-TT PMIC applied: %u octets, NW-TT port[%u] "
+                     "(DS-TT port[%u])", pmic->len,
+                     req->tsc_management_information.nw_tt_port_number.presence ?
+                        be32toh(*(uint32_t *)req->tsc_management_information.
+                            nw_tt_port_number.data) : 0,
+                     sess->nwtt.ds_tt_port_number);
         }
     }
 

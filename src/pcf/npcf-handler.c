@@ -1087,6 +1087,13 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
     sendmsg.http.location = ogs_sbi_server_uri(server, &header);
     ogs_assert(sendmsg.http.location);
 
+    /* 202606 Step 06: forward the AF's per-port PMIC containers onto the
+     * SmPolicyDecision toward the SMF (TS 29.514 -> TS 29.512). Shallow copy —
+     * AscReqData outlives the update-notify send. */
+    SmPolicyDecision.tsn_port_man_cont_dstt = AscReqData->tsn_port_man_cont_dstt;
+    SmPolicyDecision.tsn_port_man_cont_nwtts =
+        AscReqData->tsn_port_man_cont_nwtts;
+
     sendmsg.AppSessionContext = recvmsg->AppSessionContext;
 
     response = ogs_sbi_build_response(&sendmsg, OGS_SBI_HTTP_STATUS_CREATED);
