@@ -99,6 +99,28 @@ static uint16_t _get_eth_type(uint8_t *data, uint len) {
     return 0;
 }
 
+/* Phase 5 Step 2: UPF-local Ethernet fast-path classification (observability only).
+ * Runs only for Ethernet PDU sessions (Step-1 sess->correlation.ethernet). */
+#define ETHERTYPE_GPTP 0x88F7  /* IEEE 802.1AS / 1588 gPTP (TS 23.501 §5.27.1.2.2.1) */
+
+typedef enum {
+    UPF_ETH_CLASS_HIT,           /* Ethernet frame on a matched PDR */
+    UPF_ETH_CLASS_MISS,          /* matched PDR, no stream binding (populated in Step 3) */
+    UPF_ETH_CLASS_NO_PDR_MATCH,  /* session known (N3 TEID) but no PDR/filter hit */
+    UPF_ETH_CLASS_GPTP,          /* EtherType 0x88F7 -> NW-TT gPTP path */
+} upf_eth_class_t;
+
+static const char *upf_eth_class_str(upf_eth_class_t c)
+{
+    switch (c) {
+    case UPF_ETH_CLASS_HIT:          return "HIT";
+    case UPF_ETH_CLASS_MISS:         return "MISS";
+    case UPF_ETH_CLASS_NO_PDR_MATCH: return "NO_PDR_MATCH";
+    case UPF_ETH_CLASS_GPTP:         return "GPTP";
+    default:                         return "UNKNOWN";
+    }
+}
+
 static void _gtpv1_tun_recv_common_cb(
         short when, ogs_socket_t fd, bool has_eth, void *data)
 {
@@ -155,6 +177,17 @@ static void _gtpv1_tun_recv_common_cb(
             ogs_pkbuf_free(replybuf);
             goto cleanup;
         }
+        /* Phase 5 Step 2: downlink gPTP detection (NW-TT DL ingress observed).
+         * sess is not yet known here (pre-strip); the gate is interface-level
+         * (has_eth = TAP/Ethernet). The full NW-TT DL ingress action (TSi
+         * timestamp, correctionField/rateRatio update, TSi suffix; forward to
+         * DS-TT per TS 23.501 §5.27.1.2.2.1) is deferred -- we only observe it,
+         * then fall through to the existing drop. */
+        if (eth_type == ETHERTYPE_GPTP)
+            ogs_info("[UPF] Ethernet DL class[%s] ethertype[0x%04x] len[%d] "
+                     "(NW-TT gPTP ingress observed; timestamp/forward deferred)",
+                     upf_eth_class_str(UPF_ETH_CLASS_GPTP), eth_type, recvbuf->len);
+
         if (eth_type != ETHERTYPE_IP && eth_type != ETHERTYPE_IPV6) {
             ogs_error("[DROP] Invalid eth_type [%x]]", eth_type);
             ogs_log_hexdump(OGS_LOG_ERROR, recvbuf->data, recvbuf->len);
@@ -502,6 +535,20 @@ static void _gtpv1_u_recv_cb(short when, ogs_socket_t fd, void *data)
 
         far = pdr->far;
         ogs_assert(far);
+
+        /* Phase 5 Step 2: classify the uplink Ethernet frame (observability only).
+         * Done here at the matched-PDR point, before the IP-centric forwarding
+         * logic below — which does not apply to an Ethernet PDU session (no UE IP).
+         * The inner payload is the UE's Ethernet frame (GTP-U header already
+         * stripped). Gated on the Step-1 sess->correlation.ethernet flag. */
+        if (sess->correlation.ethernet) {
+            uint16_t inner_eth_type = _get_eth_type(pkbuf->data, pkbuf->len);
+            upf_eth_class_t klass = (inner_eth_type == ETHERTYPE_GPTP)
+                ? UPF_ETH_CLASS_GPTP : UPF_ETH_CLASS_HIT;
+            ogs_info("[UPF] Ethernet UL class[%s] ethertype[0x%04x] QFI[%d] "
+                     "SEID[0x%llx]", upf_eth_class_str(klass), inner_eth_type,
+                     pdr->qfi, (unsigned long long)sess->upf_n4_seid);
+        }
 
         if (ip_h->ip_v == 4 && sess->ipv4) {
             src_addr = (void *)&ip_h->ip_src.s_addr;
