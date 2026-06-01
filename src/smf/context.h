@@ -37,6 +37,7 @@
 #include "timer.h"
 #include "smf-sm.h"
 #include "metrics.h"
+#include "tsc_context.h"
 
 #if HAVE_NET_IF_H
 #include <net/if.h>
@@ -509,6 +510,11 @@ typedef struct smf_sess_s {
 
     ogs_gtp_node_t  *gnode;
     ogs_pfcp_node_t *pfcp_node;
+
+    /* Phase 6 Step 1: SMF-local TSC assistance state (Issue 6-B).
+     * NULL for baseline (non-TSC) sessions; allocated by smf_sess_tsc_add()
+     * when TSC assistance arrives (Step 2). Freed in smf_sess_remove(). */
+    tsc_context_t   *tsc;
 
     ogs_pool_id_t smf_ue_id;
 

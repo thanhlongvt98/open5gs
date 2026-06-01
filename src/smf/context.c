@@ -1812,6 +1812,9 @@ void smf_sess_remove(smf_sess_t *sess)
     if (sess->aaa_server_identifier.realm)
         ogs_free(sess->aaa_server_identifier.realm);
 
+    /* Phase 6 Step 1: free SMF-local TSC context (no-op when sess->tsc NULL). */
+    smf_sess_tsc_remove(sess);
+
     smf_bearer_remove_all(sess);
 
     ogs_assert(sess->pfcp.bar);
