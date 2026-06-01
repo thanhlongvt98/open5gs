@@ -66,6 +66,7 @@
 #include "model/policy_association.h"
 #include "model/am_policy_data.h"
 #include "model/sm_policy_context_data.h"
+#include "model/sm_policy_update_context_data.h"
 #include "model/sm_policy_decision.h"
 #include "model/sm_policy_data.h"
 #include "model/sm_policy_delete_data.h"

@@ -554,6 +554,7 @@ typedef struct ogs_sbi_message_s {
     OpenAPI_policy_update_t *PolicyUpdate;
     OpenAPI_am_policy_data_t *AmPolicyData;
     OpenAPI_sm_policy_context_data_t *SmPolicyContextData;
+    OpenAPI_sm_policy_update_context_data_t *SmPolicyUpdateContextData;
     OpenAPI_sm_policy_decision_t *SmPolicyDecision;
     OpenAPI_sm_policy_data_t *SmPolicyData;
     OpenAPI_sm_policy_delete_data_t *SmPolicyDeleteData;

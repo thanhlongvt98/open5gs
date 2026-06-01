@@ -609,6 +609,47 @@ cleanup:
     return false;
 }
 
+/*
+ * 202606 Step 03: handle the SMF-initiated Npcf_SMPolicyControl_Update
+ * (TS 29.512 §4.2.4) — in particular the 5GS TSN bridge information reported by
+ * the SMF when the TSN_BRIDGE_INFO trigger is met. The PCF records it and (per
+ * TS 29.514) relays it to the subscribed TSN AF over N5.
+ */
+bool pcf_npcf_smpolicycontrol_handle_update(pcf_sess_t *sess,
+        ogs_sbi_stream_t *stream, ogs_sbi_message_t *recvmsg)
+{
+    OpenAPI_sm_policy_update_context_data_t *UpdateData = NULL;
+
+    ogs_assert(sess);
+    ogs_assert(stream);
+    ogs_assert(recvmsg);
+
+    UpdateData = recvmsg->SmPolicyUpdateContextData;
+    if (!UpdateData) {
+        ogs_error("No SmPolicyUpdateContextData");
+        ogs_assert(true == ogs_sbi_server_send_error(stream,
+                OGS_SBI_HTTP_STATUS_BAD_REQUEST, recvmsg,
+                "No SmPolicyUpdateContextData", NULL, NULL));
+        return false;
+    }
+
+    if (UpdateData->tsn_bridge_info) {
+        OpenAPI_tsn_bridge_info_t *bi = UpdateData->tsn_bridge_info;
+        ogs_info("[PCF] 5GS TSN bridge reported: bridgeId[%d] DS-TT port[%d] "
+                 "-> relay to TSN AF",
+                 bi->is_bridge_id ? bi->bridge_id : -1,
+                 bi->is_dstt_port_num ? bi->dstt_port_num : -1);
+        /* TODO(af-relay): forward tsnBridgeInfo to the subscribed AF
+         * app-session via an Npcf_PolicyAuthorization events notification (N5,
+         * TS 29.514). The SMF->PCF leg is spec-complete here. */
+    }
+
+    ogs_expect(true ==
+            ogs_sbi_send_response(stream, OGS_SBI_HTTP_STATUS_NO_CONTENT));
+
+    return true;
+}
+
 bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
         ogs_sbi_stream_t *stream, ogs_sbi_message_t *recvmsg)
 {

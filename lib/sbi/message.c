@@ -166,6 +166,9 @@ void ogs_sbi_message_free(ogs_sbi_message_t *message)
         OpenAPI_am_policy_data_free(message->AmPolicyData);
     if (message->SmPolicyContextData)
         OpenAPI_sm_policy_context_data_free(message->SmPolicyContextData);
+    if (message->SmPolicyUpdateContextData)
+        OpenAPI_sm_policy_update_context_data_free(
+                message->SmPolicyUpdateContextData);
     if (message->SmPolicyDecision)
         OpenAPI_sm_policy_decision_free(message->SmPolicyDecision);
     if (message->SmPolicyData)
@@ -1364,6 +1367,10 @@ static char *build_json(ogs_sbi_message_t *message)
     } else if (message->AmPolicyData) {
         item = OpenAPI_am_policy_data_convertToJSON(message->AmPolicyData);
         ogs_assert(item);
+    } else if (message->SmPolicyUpdateContextData) {
+        item = OpenAPI_sm_policy_update_context_data_convertToJSON(
+                message->SmPolicyUpdateContextData);
+        ogs_assert(item);
     } else if (message->SmPolicyContextData) {
         item = OpenAPI_sm_policy_context_data_convertToJSON(
                 message->SmPolicyContextData);
@@ -2314,6 +2321,20 @@ static int parse_json(ogs_sbi_message_t *message,
                                 OpenAPI_sm_policy_delete_data_parseFromJSON(
                                         item);
                             if (!message->SmPolicyDeleteData) {
+                                rv = OGS_ERROR;
+                                ogs_error("JSON parse error");
+                            }
+                        }
+                        break;
+                    CASE(OGS_SBI_RESOURCE_NAME_UPDATE)
+                        /* SMF -> PCF Npcf_SMPolicyControl_Update request
+                         * (TS 29.512): SmPolicyUpdateContextData (e.g. TSN
+                         * bridge info reporting). */
+                        if (message->res_status == 0) {
+                            message->SmPolicyUpdateContextData =
+                                OpenAPI_sm_policy_update_context_data_parseFromJSON(
+                                        item);
+                            if (!message->SmPolicyUpdateContextData) {
                                 rv = OGS_ERROR;
                                 ogs_error("JSON parse error");
                             }

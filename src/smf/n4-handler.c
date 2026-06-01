@@ -195,6 +195,17 @@ uint8_t smf_5gc_n4_handle_session_establishment_response(
             sess->tsc_bridge.ds_tt_port = be32toh(*(uint32_t *)p->data);
         ogs_info("[SMF] 5GS-TSN bridge: DS-TT port[%u] (PSI[%d])",
                 sess->tsc_bridge.ds_tt_port, sess->psi);
+
+        /* 202606 Step 03: report the 5GS TSN bridge to the PCF (which relays
+         * it to the TSN AF) via Npcf_SMPolicyControl_Update (TS 29.512). The
+         * trigger (TSN_BRIDGE_INFO) is met now that the DS-TT port is known. */
+        if (sess->policy_association.resource_uri) {
+            int r = smf_sbi_discover_and_send(
+                    OGS_SBI_SERVICE_TYPE_NPCF_SMPOLICYCONTROL, NULL,
+                    smf_npcf_smpolicycontrol_build_update_tsn_bridge,
+                    sess, NULL, 0, NULL);
+            ogs_expect(r == OGS_OK);
+        }
     }
 
     for (i = 0; i < OGS_MAX_NUM_OF_PDR; i++) {

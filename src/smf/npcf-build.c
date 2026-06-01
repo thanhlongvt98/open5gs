@@ -467,3 +467,58 @@ end:
 
     return request;
 }
+
+/*
+ * 202606 Step 03: Npcf_SMPolicyControl_Update (SMF -> PCF, TS 29.512 §4.2.4).
+ * Report the 5GS TSN bridge information once the bridge port is established
+ * (DS-TT port assigned by the UPF). POST {smPolicyUri}/update with
+ * SmPolicyUpdateContextData { repPolicyCtrlReqTriggers:[TSN_BRIDGE_INFO],
+ * tsnBridgeInfo }. The PCF relays the bridge info to the TSN AF (N5).
+ */
+ogs_sbi_request_t *smf_npcf_smpolicycontrol_build_update_tsn_bridge(
+        smf_sess_t *sess, void *data)
+{
+    ogs_sbi_message_t message;
+    ogs_sbi_request_t *request = NULL;
+
+    OpenAPI_sm_policy_update_context_data_t SmPolicyUpdateContextData;
+    OpenAPI_tsn_bridge_info_t TsnBridgeInfo;
+    OpenAPI_list_t *TriggerList = NULL;
+
+    ogs_assert(sess);
+    ogs_assert(sess->policy_association.resource_uri);
+
+    memset(&message, 0, sizeof(message));
+    message.h.method = (char *)OGS_SBI_HTTP_METHOD_POST;
+    message.h.uri = ogs_msprintf("%s/%s",
+            sess->policy_association.resource_uri,
+            OGS_SBI_RESOURCE_NAME_UPDATE);
+    ogs_assert(message.h.uri);
+
+    memset(&SmPolicyUpdateContextData, 0, sizeof(SmPolicyUpdateContextData));
+    memset(&TsnBridgeInfo, 0, sizeof(TsnBridgeInfo));
+
+    /* repPolicyCtrlReqTriggers = [ TSN_BRIDGE_INFO ] */
+    TriggerList = OpenAPI_list_create();
+    ogs_assert(TriggerList);
+    OpenAPI_list_add(TriggerList,
+            (void *)OpenAPI_policy_control_request_trigger_TSN_BRIDGE_INFO);
+    SmPolicyUpdateContextData.rep_policy_ctrl_req_triggers = TriggerList;
+
+    /* tsnBridgeInfo: bridge id + the assigned DS-TT port number */
+    TsnBridgeInfo.is_bridge_id = true;
+    TsnBridgeInfo.bridge_id = (int)sess->smf_n4_seid;
+    TsnBridgeInfo.is_dstt_port_num = true;
+    TsnBridgeInfo.dstt_port_num = sess->tsc_bridge.ds_tt_port;
+    SmPolicyUpdateContextData.tsn_bridge_info = &TsnBridgeInfo;
+
+    message.SmPolicyUpdateContextData = &SmPolicyUpdateContextData;
+
+    request = ogs_sbi_build_request(&message);
+    ogs_expect(request);
+
+    OpenAPI_list_free(TriggerList);
+    ogs_free(message.h.uri);
+
+    return request;
+}

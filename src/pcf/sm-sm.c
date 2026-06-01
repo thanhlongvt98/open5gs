@@ -100,6 +100,19 @@ void pcf_sm_state_operational(ogs_fsm_t *s, pcf_event_t *e)
                     }
                     break;
 
+                CASE(OGS_SBI_RESOURCE_NAME_UPDATE)
+                    /* 202606 Step 03: SMF -> PCF SM Policy Update (e.g. 5GS TSN
+                     * bridge info reporting, TS 29.512). */
+                    handled = pcf_npcf_smpolicycontrol_handle_update(
+                            sess, stream, message);
+                    if (!handled) {
+                        ogs_error("[%s:%d] "
+                            "pcf_npcf_smpolicycontrol_handle_update() failed",
+                            pcf_ue_sm->supi, sess->psi);
+                        OGS_FSM_TRAN(s, pcf_sm_state_exception);
+                    }
+                    break;
+
                 DEFAULT
                     ogs_error("[%s:%d] Invalid HTTP URI [%s]",
                             pcf_ue_sm->supi, sess->psi, message->h.uri);
