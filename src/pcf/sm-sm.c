@@ -101,7 +101,7 @@ void pcf_sm_state_operational(ogs_fsm_t *s, pcf_event_t *e)
                     break;
 
                 CASE(OGS_SBI_RESOURCE_NAME_UPDATE)
-                    /* 202606 Step 03: SMF -> PCF SM Policy Update (e.g. 5GS TSN
+                    /* SMF -> PCF SM Policy Update (e.g. 5GS TSN
                      * bridge info reporting, TS 29.512). */
                     handled = pcf_npcf_smpolicycontrol_handle_update(
                             sess, stream, message);
@@ -307,7 +307,19 @@ void pcf_sm_state_operational(ogs_fsm_t *s, pcf_event_t *e)
                 } else {
                     SWITCH(message->h.method)
                     CASE(OGS_SBI_HTTP_METHOD_POST)
-                        if (message->res_status ==
+                        if (sess->mac_register_pending) {
+                            /* this BSF binding was registered by MAC
+                             * during an SM Policy update (ueMac N5 binding);
+                             * ack the SMF's update with 204. */
+                            sess->mac_register_pending = false;
+                            if (message->res_status !=
+                                    OGS_SBI_HTTP_STATUS_CREATED)
+                                ogs_warn("[%s:%d] BSF MAC register [%d]",
+                                    pcf_ue_sm->supi, sess->psi,
+                                    message->res_status);
+                            ogs_expect(true == ogs_sbi_send_response(stream,
+                                    OGS_SBI_HTTP_STATUS_NO_CONTENT));
+                        } else if (message->res_status ==
                                 OGS_SBI_HTTP_STATUS_CREATED) {
                             pcf_nbsf_management_handle_register(
                                     sess, stream, message);

@@ -282,7 +282,12 @@ bool pcf_npcf_smpolicycontrol_handle_create(pcf_sess_t *sess,
         goto cleanup;
     }
 
-    if (!SmPolicyContextData->ipv4_address &&
+    /* an Ethernet PDU session (TS 23.501 §5.6.10) carries no UE
+     * IP — the SM Policy Association is keyed by SUPI/DNN/MAC, not an address.
+     * Only require an IPv4/IPv6 address for IP PDU session types. */
+    if (SmPolicyContextData->pdu_session_type !=
+                OpenAPI_pdu_session_type_ETHERNET &&
+        !SmPolicyContextData->ipv4_address &&
         !SmPolicyContextData->ipv6_address_prefix) {
         strerror = ogs_msprintf(
                 "[%s:%d] No IPv4 address[%p] or IPv6 prefix[%p]",
@@ -610,7 +615,7 @@ cleanup:
 }
 
 /*
- * 202606 Step 03: handle the SMF-initiated Npcf_SMPolicyControl_Update
+ * handle the SMF-initiated Npcf_SMPolicyControl_Update
  * (TS 29.512 §4.2.4) — in particular the 5GS TSN bridge information reported by
  * the SMF when the TSN_BRIDGE_INFO trigger is met. The PCF records it and (per
  * TS 29.514) relays it to the subscribed TSN AF over N5.
@@ -635,13 +640,46 @@ bool pcf_npcf_smpolicycontrol_handle_update(pcf_sess_t *sess,
 
     if (UpdateData->tsn_bridge_info) {
         OpenAPI_tsn_bridge_info_t *bi = UpdateData->tsn_bridge_info;
-        ogs_info("[PCF] 5GS TSN bridge reported: bridgeId[%d] DS-TT port[%d] "
-                 "-> relay to TSN AF",
+        ogs_info("[PCF] 5GS TSN bridge reported: bridgeId[%d] DS-TT port[%d]"
+                 "%s%s -> relay to TSN AF",
                  bi->is_bridge_id ? bi->bridge_id : -1,
-                 bi->is_dstt_port_num ? bi->dstt_port_num : -1);
-        /* TODO(af-relay): forward tsnBridgeInfo to the subscribed AF
-         * app-session via an Npcf_PolicyAuthorization events notification (N5,
-         * TS 29.514). The SMF->PCF leg is spec-complete here. */
+                 bi->is_dstt_port_num ? bi->dstt_port_num : -1,
+                 bi->dstt_addr ? " DS-TT MAC " : "",
+                 bi->dstt_addr ? bi->dstt_addr : "");
+
+        /* the DS-TT MAC lets the PCF bind the N5 app-session by ueMac
+         * (Ethernet sessions have no UE IP, TS 29.514). Store it for the local
+         * app-session lookup, and register a BSF binding by MAC (TS 29.521
+         * PcfBinding.macAddr48). The 204 to the SMF is deferred to the BSF
+         * register response (mac_register_pending). */
+        if (bi->dstt_addr &&
+            pcf_sess_set_mac_addr(sess, bi->dstt_addr) == true) {
+            int r;
+            pcf_ue_sm_t *pcf_ue_sm = pcf_ue_sm_find_by_id(sess->pcf_ue_sm_id);
+
+            /* Register the BSF MAC-binding FIRST (local, fast) so it is in place
+             * before the AF's ueMac app-session create (triggered by the relay
+             * below) reaches the PCF -> avoids a discover-by-MAC 404 race. */
+            sess->mac_register_pending = true;
+            r = pcf_sess_sbi_discover_and_send(
+                    OGS_SBI_SERVICE_TYPE_NBSF_MANAGEMENT, NULL,
+                    pcf_nbsf_management_build_register, sess, stream, NULL);
+            ogs_expect(r == OGS_OK);
+
+            /* option-3: relay the learned bridge + DS-TT MAC to the TSN
+             * AF (replaces the manual driver injection). The AF binds the N5
+             * app-session by this ueMac (TS 29.514) and auto-publishes the
+             * declared stream. Keyed by supi (Ethernet sessions have no UE IP). */
+            pcf_sbi_send_tsn_bridge_relay(
+                    pcf_ue_sm ? pcf_ue_sm->supi : NULL,
+                    bi->is_bridge_id ? bi->bridge_id : 0,
+                    bi->is_dstt_port_num ? bi->dstt_port_num : 0,
+                    bi->dstt_addr);
+
+            if (r == OGS_OK)
+                return true; /* 204 sent by the BSF register response handler */
+            sess->mac_register_pending = false;
+        }
     }
 
     ogs_expect(true ==
@@ -811,7 +849,7 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
                         ogs_sbi_bitrate_from_string(MediaComponent->rs_bw);
                 media_component->flow_status = MediaComponent->f_status;
 
-                /* Phase 6: capture the AF's TSCAI input containers (TS 29.514)
+                /* capture the AF's TSCAI input containers (TS 29.514)
                  * into the internal media component so they are carried onto
                  * the PCC rule and emitted toward the SMF on the
                  * SmPolicyDecision. */
@@ -888,6 +926,27 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
 
                                     sub->num_of_flow++;
                                 }
+                            }
+
+                            /* TSN Ethernet PDU session: the AF carries the
+                             * stream identity as an EthFlowDescription
+                             * (destMacAddr + VLAN, TS 29.514). open5gs's
+                             * policy model (ogs_flow_t) is IP-only, so we map
+                             * the Ethernet flow to a match-all IP SDF here so
+                             * the SMF can bind a QoS flow (and the TSCAI). The
+                             * real per-stream L2 filtering is enforced at the
+                             * DS-TT/NW-TT PSFP via the PMIC, not this SDF. */
+                            if (sub->num_of_flow == 0 &&
+                                    SubComponent->ethf_descs &&
+                                    SubComponent->ethf_descs->count > 0) {
+                                ogs_flow_t *flow =
+                                    &sub->flow[sub->num_of_flow];
+                                flow->description =
+                                    ogs_strdup("permit out ip from any to any");
+                                ogs_assert(flow->description);
+                                sub->num_of_flow++;
+                                ogs_info("[PCF] EthFlowDescription -> "
+                                        "match-all SDF (TSN bridge flow)");
                             }
                             media_component->num_of_sub++;
                         }
@@ -1128,7 +1187,7 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
     sendmsg.http.location = ogs_sbi_server_uri(server, &header);
     ogs_assert(sendmsg.http.location);
 
-    /* 202606 Step 06: forward the AF's per-port PMIC containers onto the
+    /* forward the AF's per-port PMIC containers onto the
      * SmPolicyDecision toward the SMF (TS 29.514 -> TS 29.512). Shallow copy —
      * AscReqData outlives the update-notify send. */
     SmPolicyDecision.tsn_port_man_cont_dstt = AscReqData->tsn_port_man_cont_dstt;
@@ -1329,7 +1388,7 @@ bool pcf_npcf_policyauthorization_handle_update(
                         ogs_sbi_bitrate_from_string(MediaComponent->rs_bw);
                 media_component->flow_status = MediaComponent->f_status;
 
-                /* Phase 6: capture the AF's TSCAI input containers (TS 29.514)
+                /* capture the AF's TSCAI input containers (TS 29.514)
                  * into the internal media component so they are carried onto
                  * the PCC rule and emitted toward the SMF on the
                  * SmPolicyDecision. */
@@ -1406,6 +1465,27 @@ bool pcf_npcf_policyauthorization_handle_update(
 
                                     sub->num_of_flow++;
                                 }
+                            }
+
+                            /* TSN Ethernet PDU session: the AF carries the
+                             * stream identity as an EthFlowDescription
+                             * (destMacAddr + VLAN, TS 29.514). open5gs's
+                             * policy model (ogs_flow_t) is IP-only, so we map
+                             * the Ethernet flow to a match-all IP SDF here so
+                             * the SMF can bind a QoS flow (and the TSCAI). The
+                             * real per-stream L2 filtering is enforced at the
+                             * DS-TT/NW-TT PSFP via the PMIC, not this SDF. */
+                            if (sub->num_of_flow == 0 &&
+                                    SubComponent->ethf_descs &&
+                                    SubComponent->ethf_descs->count > 0) {
+                                ogs_flow_t *flow =
+                                    &sub->flow[sub->num_of_flow];
+                                flow->description =
+                                    ogs_strdup("permit out ip from any to any");
+                                ogs_assert(flow->description);
+                                sub->num_of_flow++;
+                                ogs_info("[PCF] EthFlowDescription -> "
+                                        "match-all SDF (TSN bridge flow)");
                             }
                             media_component->num_of_sub++;
                         }

@@ -1091,6 +1091,21 @@ void smf_gsm_state_operational(ogs_fsm_t *s, smf_event_t *e)
                         }
                         break;
 
+                    CASE(OGS_SBI_RESOURCE_NAME_UPDATE)
+                        /* response to the SMF-initiated SM Policy
+                         * Association Update that reported tsnBridgeInfo (TS 29.512
+                         * §4.2.4). Consume it without a state transition — this is a
+                         * side report during/after establishment, NOT a session
+                         * teardown trigger. */
+                        if (sbi_message->res_status != OGS_SBI_HTTP_STATUS_OK &&
+                                sbi_message->res_status !=
+                                        OGS_SBI_HTTP_STATUS_NO_CONTENT) {
+                            ogs_warn("[%s:%d] SM Policy update (tsnBridgeInfo) "
+                                    "response [%d]", smf_ue->supi, sess->psi,
+                                    sbi_message->res_status);
+                        }
+                        break;
+
                     DEFAULT
                         strerror = ogs_msprintf("[%s:%d] "
                                 "Unknown resource name [%s]",

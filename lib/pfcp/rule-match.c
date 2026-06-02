@@ -156,9 +156,14 @@ ogs_pfcp_rule_t *ogs_pfcp_pdr_rule_find_by_packet(
             dst_addr = (void *)ip6_h->ip6_dst.s6_addr;
             addr_len = OGS_IPV6_LEN;
         } else {
-            ogs_error("Invalid packet [IP version:%d, Packet Length:%d]",
+            /* Non-IP frame — expected on an Ethernet PDU session (ARP, broadcast
+             * DHCP, gPTP, raw L2). SDF IP rule matching does not apply, so skip it
+             * quietly. The "IP version" here is just the first nibble of the
+             * destination MAC (e.g. 15 for an ff:ff:ff:ff:ff:ff broadcast), not a
+             * real IP version, so do not log it at ERROR — it would flood per frame. */
+            ogs_debug("Non-IP packet [first nibble:%d, len:%d] - skipping IP rule match",
                     ip_h->ip_v, pkbuf->len);
-            ogs_log_hexdump(OGS_LOG_ERROR, pkbuf->data, pkbuf->len);
+            ogs_log_hexdump(OGS_LOG_TRACE, pkbuf->data, pkbuf->len);
             continue;
         }
 

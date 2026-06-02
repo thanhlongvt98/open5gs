@@ -159,6 +159,8 @@ typedef struct upf_sess_s {
         bool     pmic_present;       /* a PMIC (PSFP tables) has been received */
         uint32_t pmic_len;           /* length of the last PMIC (octets) */
         void    *pmic;               /* 202606 Step 08: programmed PMIC blob   */
+        bool     mac_reported;       /* 202606: a learned DS-TT MAC was reported
+                                        to the SMF (PFCP MAC Addresses Detected) */
     } nwtt;
 } upf_sess_t;
 
@@ -178,19 +180,23 @@ upf_sess_t *upf_sess_find_by_smf_n4_f_seid(ogs_pfcp_f_seid_t *f_seid);
 upf_sess_t *upf_sess_find_by_upf_n4_seid(uint64_t seid);
 upf_sess_t *upf_sess_find_by_ipv4(uint32_t addr);
 upf_sess_t *upf_sess_find_by_ipv6(uint32_t *addr6);
-/* Phase 5 Step 4: NW-TT MAC-learning bridge for Ethernet PDU sessions.
+/* NW-TT MAC-learning bridge for Ethernet PDU sessions.
  * upf_sess_learn_mac() records an inner source MAC seen on UL; the matching
  * upf_sess_find_by_mac() resolves a DL frame's destination MAC to its session. */
 void upf_sess_learn_mac(upf_sess_t *sess, const uint8_t *mac);
 upf_sess_t *upf_sess_find_by_mac(const uint8_t *mac);
+/* report a learned DS-TT MAC to the SMF via a PFCP Session Report
+ * (Ethernet Traffic Information -> MAC Addresses Detected). Reports once per
+ * session (nwtt.mac_reported); enables ueMac-based N5 binding. */
+void upf_sess_report_learned_mac(upf_sess_t *sess, const uint8_t *mac);
 upf_sess_t *upf_sess_find_by_id(ogs_pool_id_t id);
 
 uint8_t upf_sess_set_ue_ip(upf_sess_t *sess,
         uint8_t session_type, ogs_pfcp_pdr_t *pdr);
-/* Phase 5 Step 1: record the PDU session type as UPF-local correlation state
+/* record the PDU session type as UPF-local correlation state
  * (logs the creation for an Ethernet PDU session). */
 void upf_sess_set_correlation(upf_sess_t *sess, uint8_t session_type);
-/* Phase 5 Step 3: assign a DS-TT port number for a 5GS-TSN-bridge PDU session
+/* assign a DS-TT port number for a 5GS-TSN-bridge PDU session
  * (returned in the PFCP created_bridge_info_for_tsc IE). Monotonic, >= 1. */
 uint32_t upf_sess_assign_dstt_port(void);
 uint8_t upf_sess_set_ue_ipv4_framed_routes(upf_sess_t *sess,

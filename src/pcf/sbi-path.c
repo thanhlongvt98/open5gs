@@ -703,3 +703,66 @@ bool pcf_sbi_send_policyauthorization_terminate_notify(pcf_app_t *app)
 
     return rc;
 }
+
+/*
+ * option-3: relay the learned 5GS bridge + DS-TT MAC to the TSN AF
+ * northbound (/v1/bridges). The AF URL comes from TSN_AF_BRIDGE_URI (the AF runs
+ * in the 5GC netns, default http://127.0.0.1:8080/v1/bridges). Fire-and-forget;
+ * the AF binds the N5 app-session by this ueMac and auto-publishes the stream.
+ */
+bool pcf_sbi_send_tsn_bridge_relay(
+        const char *supi, int bridge_id, int ds_tt_port, const char *ds_tt_mac)
+{
+    bool rc;
+    ogs_sbi_request_t *request = NULL;
+    ogs_sbi_client_t *client = NULL;
+    OpenAPI_uri_scheme_e scheme = OpenAPI_uri_scheme_NULL;
+    char *fqdn = NULL;
+    uint16_t fqdn_port = 0;
+    ogs_sockaddr_t *addr = NULL, *addr6 = NULL;
+    const char *af_uri = NULL;
+
+    af_uri = getenv("TSN_AF_BRIDGE_URI");
+    if (!af_uri)
+        af_uri = "http://127.0.0.1:8080/v1/bridges";
+
+    rc = ogs_sbi_getaddr_from_uri(
+            &scheme, &fqdn, &fqdn_port, &addr, &addr6, (char *)af_uri);
+    if (rc == false || scheme == OpenAPI_uri_scheme_NULL) {
+        ogs_error("[PCF] TSN AF relay: bad TSN_AF_BRIDGE_URI [%s]", af_uri);
+        return false;
+    }
+
+    client = ogs_sbi_client_find(scheme, fqdn, fqdn_port, addr, addr6);
+    if (!client) {
+        client = ogs_sbi_client_add(scheme, fqdn, fqdn_port, addr, addr6);
+        if (!client) {
+            ogs_error("[PCF] TSN AF relay: ogs_sbi_client_add() failed");
+            ogs_free(fqdn);
+            ogs_freeaddrinfo(addr);
+            ogs_freeaddrinfo(addr6);
+            return false;
+        }
+    }
+    ogs_free(fqdn);
+    ogs_freeaddrinfo(addr);
+    ogs_freeaddrinfo(addr6);
+
+    request = pcf_naf_build_tsn_bridge_register(
+            af_uri, supi, bridge_id, ds_tt_port, ds_tt_mac);
+    if (!request) {
+        ogs_error("[PCF] TSN AF relay: build request failed");
+        return false;
+    }
+
+    rc = ogs_sbi_send_request_to_client(
+            client, client_notify_cb, request, NULL);
+    ogs_expect(rc == true);
+
+    ogs_sbi_request_free(request);
+
+    ogs_info("[PCF] relayed TSN bridge to AF [%s] supi[%s] dsttMac[%s]",
+            af_uri, supi ? supi : "", ds_tt_mac ? ds_tt_mac : "");
+
+    return rc;
+}

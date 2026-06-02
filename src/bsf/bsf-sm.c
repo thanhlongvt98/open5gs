@@ -156,6 +156,17 @@ void bsf_state_operational(ogs_fsm_t *s, bsf_event_t *e)
                                             message.PcfBinding->ipv6_prefix);
                                 ogs_assert(sess);
                             }
+                        /* Ethernet PDU session has no UE IP — bind by
+                         * MAC (PcfBinding.macAddr48). */
+                        } else if (message.PcfBinding &&
+                                   message.PcfBinding->mac_addr48) {
+                            sess = bsf_sess_find_by_mac_addr(
+                                        message.PcfBinding->mac_addr48);
+                            if (!sess) {
+                                sess = bsf_sess_add_by_mac_address(
+                                            message.PcfBinding->mac_addr48);
+                                ogs_assert(sess);
+                            }
                         }
                         break;
                     CASE(OGS_SBI_HTTP_METHOD_GET)
@@ -165,6 +176,9 @@ void bsf_state_operational(ogs_fsm_t *s, bsf_event_t *e)
                         if (!sess && message.param.ipv6prefix)
                             sess = bsf_sess_find_by_ipv6prefix(
                                         message.param.ipv6prefix);
+                        if (!sess && message.param.mac_addr)
+                            sess = bsf_sess_find_by_mac_addr(
+                                        message.param.mac_addr);
                         break;
                     DEFAULT
                         ogs_error("Invalid HTTP method [%s]", message.h.method);

@@ -1812,10 +1812,10 @@ void smf_sess_remove(smf_sess_t *sess)
     if (sess->aaa_server_identifier.realm)
         ogs_free(sess->aaa_server_identifier.realm);
 
-    /* Phase 6 Step 1: free SMF-local TSC context (no-op when sess->tsc NULL). */
+    /* free SMF-local TSC context (no-op when sess->tsc NULL). */
     smf_sess_tsc_remove(sess);
 
-    /* 202606 Step 06/07: free the per-port PMIC blobs. */
+    /* /07: free the per-port PMIC blobs. */
     if (sess->tsc_bridge.dstt_pmic)
         ogs_free(sess->tsc_bridge.dstt_pmic);
     if (sess->tsc_bridge.nwtt_pmic)

@@ -24,7 +24,7 @@
 
 #include "npcf-handler.h"
 
-/* Phase 6 Step 2: ingest the standard TSCAI input containers from a PCC rule
+/* ingest the standard TSCAI input containers from a PCC rule
  * (TS 29.512) into the SMF-local TSC context (Step 1). Direction is implicit in
  * DL vs UL container presence (TS 23.501 Table 5.27.2-1). Clock conversion of
  * the burst arrival time is deferred (Phase 7); the raw value is stored as the
@@ -69,9 +69,9 @@ static void smf_tsc_ingest_pcc_rule(
     else
         tsc->direction = TSC_UL;
 
-    /* Phase 6 Step 4: classify on the MANDATORY field. Periodicity is mandatory
+    /* classify on the MANDATORY field. Periodicity is mandatory
      * (TS 38.413 §9.3.1.131); Burst Arrival Time is optional (absent until the
-     * Phase-7 5G-clock conversion), so its absence is NOT a downgrade. A flow
+     * G-clock conversion), so its absence is NOT a downgrade. A flow
      * that is not ACTIVE omits the NGAP IE and runs on its 5QI. */
     if (!t->is_periodicity)
         smf_sess_tsc_set_status(tsc, TSC_STATUS_PARTIAL,
@@ -331,7 +331,7 @@ static void update_authorized_pcc_rule_and_qos(
                     pcc_rule->qos.gbr.uplink = MAX_BIT_RATE;
             }
 
-            /* Phase 6 Step 2: ingest TSCAI from this PCC rule into the
+            /* ingest TSCAI from this PCC rule into the
              * SMF-local TSC context. */
             smf_tsc_ingest_pcc_rule(sess, PccRule);
 
@@ -339,7 +339,7 @@ static void update_authorized_pcc_rule_and_qos(
         }
     }
 
-    /* 202606 Step 06: ingest the per-port PMIC containers the AF pushed
+    /* ingest the per-port PMIC containers the AF pushed
      * (SmPolicyDecision.tsn_port_man_cont_*, TS 29.512) into SMF-local bridge
      * state, to be built down to the TTs over N4 (NW-TT) and N1 (DS-TT). */
     if (SmPolicyDecision->tsn_port_man_cont_dstt &&

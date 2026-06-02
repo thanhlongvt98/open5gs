@@ -511,23 +511,27 @@ typedef struct smf_sess_s {
     ogs_gtp_node_t  *gnode;
     ogs_pfcp_node_t *pfcp_node;
 
-    /* Phase 6 Step 1: SMF-local TSC assistance state (Issue 6-B).
+    /* SMF-local TSC assistance state (Issue 6-B).
      * NULL for baseline (non-TSC) sessions; allocated by smf_sess_tsc_add()
      * when TSC assistance arrives (Step 2). Freed in smf_sess_remove(). */
     tsc_context_t   *tsc;
 
-    /* 202606 Step 02: 5GS-TSN-bridge port state (TS 29.244 create/created
+    /* 5GS-TSN-bridge port state (TS 29.244 create/created
      * bridge info for TSC). Set when the SMF requests a bridge port at PFCP
      * establishment and the UPF returns the DS-TT port number. */
     struct {
         bool        bridge;       /* create_bridge_info_for_tsc was requested */
         uint32_t    ds_tt_port;   /* assigned by the UPF (created_bridge_info) */
         uint32_t    nw_tt_port;   /* NW-TT port (from the AF PMIC, Step 06)    */
-        /* 202606 Step 06/07: per-port PMIC (port management info container)
+        /* /07: per-port PMIC (port management info container)
          * received from the AF (N5->PCF->SMF) to push down to the TTs. Opaque
          * managed-object blobs; freed in smf_sess_remove(). */
         char       *dstt_pmic;    /* DS-TT PMIC -> N1 NAS (TS 24.501 9.11.4.27)*/
         char       *nwtt_pmic;    /* NW-TT PMIC -> N4 PFCP (TS 29.244)         */
+        /* DS-TT MAC reported by the NW-TT (PFCP MAC Addresses Detected),
+         * relayed to the PCF (TsnBridgeInfo.dsttAddr) for ueMac N5 binding. */
+        uint8_t     ds_tt_mac[6];
+        bool        has_ds_tt_mac;
     } tsc_bridge;
 
     ogs_pool_id_t smf_ue_id;

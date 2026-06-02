@@ -296,7 +296,8 @@ void pcf_state_operational(ogs_fsm_t *s, pcf_event_t *e)
                     if (message.AppSessionContext &&
                         message.AppSessionContext->asc_req_data &&
                         (message.AppSessionContext->asc_req_data->ue_ipv4 ||
-                         message.AppSessionContext->asc_req_data->ue_ipv6)) {
+                         message.AppSessionContext->asc_req_data->ue_ipv6 ||
+                         message.AppSessionContext->asc_req_data->ue_mac)) {
 
                         if (!sess &&
                             message.AppSessionContext->asc_req_data->ue_ipv4)
@@ -306,6 +307,11 @@ void pcf_state_operational(ogs_fsm_t *s, pcf_event_t *e)
                             message.AppSessionContext->asc_req_data->ue_ipv6)
                             sess = pcf_sess_find_by_ipv6addr(message.
                                     AppSessionContext->asc_req_data->ue_ipv6);
+                        /* Ethernet PDU session — bind by ueMac (no IP). */
+                        if (!sess &&
+                            message.AppSessionContext->asc_req_data->ue_mac)
+                            sess = pcf_sess_find_by_mac_addr(message.
+                                    AppSessionContext->asc_req_data->ue_mac);
                     }
                 } else {
                     app_session = pcf_app_find_by_app_session_id(

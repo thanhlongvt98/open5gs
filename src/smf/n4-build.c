@@ -79,7 +79,7 @@ ogs_pkbuf_t *smf_n4_build_session_establishment_request(
     req->cp_f_seid.data = &f_seid;
     req->cp_f_seid.len = len;
 
-    /* 202606 Step 02: request a 5GS-TSN-bridge port for an Ethernet PDU session
+    /* request a 5GS-TSN-bridge port for an Ethernet PDU session
      * (TS 29.244 create_bridge_info_for_tsc, IE 194). The single octet carries
      * the BII (Bridge Information Indication) flag; the UPF replies with the
      * assigned DS-TT port in created_bridge_info_for_tsc. */
@@ -313,7 +313,7 @@ ogs_pkbuf_t *smf_n4_build_pdr_to_modify_list(
         i++;
     }
 
-    /* 202606 Step 07: deliver the NW-TT PMIC to the UPF over N4 (TS 29.244
+    /* deliver the NW-TT PMIC to the UPF over N4 (TS 29.244
      * tsc_management_information). port_management_information_container is the
      * opaque managed-object blob; nw_tt_port_number is 4-octet big-endian. */
     if (sess->tsc_bridge.nwtt_pmic) {

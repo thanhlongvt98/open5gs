@@ -513,6 +513,57 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_modify_request_transfer(
                     (long long)qos_flow->qos.gbr.uplink);
             }
         }
+
+        /* Phase 6 Step 3: attach TSC Traffic Characteristics (id 196) on this
+         * QoS Flow Add/Modify Request Item. For Ethernet/TSN bridge sessions the
+         * QoS flow (and its TSCAI) is installed post-establishment, so the gNB
+         * receives the TSC IE here on the Modify path rather than at Setup.
+         * Mirrors the Setup-path encoding above. */
+        if (sess->tsc && sess->tsc->status == TSC_STATUS_ACTIVE &&
+                qos_flow->qfi == sess->tsc->qfi) {
+            NGAP_ProtocolExtensionContainer_11905P269_t *tscExtContainer = NULL;
+            NGAP_QosFlowAddOrModifyRequestItem_ExtIEs_t *tscExtIe = NULL;
+            NGAP_TSCTrafficCharacteristics_t *TSCTrafficCharacteristics = NULL;
+
+            tscExtContainer = CALLOC(1,
+                    sizeof(NGAP_ProtocolExtensionContainer_11905P269_t));
+            ogs_assert(tscExtContainer);
+            QosFlowAddOrModifyRequestItem->iE_Extensions =
+                (struct NGAP_ProtocolExtensionContainer *)tscExtContainer;
+
+            tscExtIe = CALLOC(1,
+                    sizeof(NGAP_QosFlowAddOrModifyRequestItem_ExtIEs_t));
+            ogs_assert(tscExtIe);
+            ASN_SEQUENCE_ADD(&tscExtContainer->list, tscExtIe);
+
+            tscExtIe->id = NGAP_ProtocolIE_ID_id_TSCTrafficCharacteristics;
+            tscExtIe->criticality = NGAP_Criticality_ignore;
+            tscExtIe->extensionValue.present =
+                NGAP_QosFlowAddOrModifyRequestItem_ExtIEs__extensionValue_PR_TSCTrafficCharacteristics;
+
+            TSCTrafficCharacteristics =
+                &tscExtIe->extensionValue.choice.TSCTrafficCharacteristics;
+
+            if (sess->tsc->direction == TSC_DL ||
+                    sess->tsc->direction == TSC_BOTH)
+                TSCTrafficCharacteristics->tSCAssistanceInformationDL =
+                    smf_ngap_build_tsc_assistance(sess->tsc);
+            if (sess->tsc->direction == TSC_UL ||
+                    sess->tsc->direction == TSC_BOTH)
+                TSCTrafficCharacteristics->tSCAssistanceInformationUL =
+                    smf_ngap_build_tsc_assistance(sess->tsc);
+
+            ogs_info("[SMF] NGAP TSC Traffic Characteristics encoded (modify): "
+                     "QFI[%d] dir[%d] periodicity[%llu us]",
+                     qos_flow->qfi, sess->tsc->direction,
+                     (unsigned long long)sess->tsc->periodicity_us);
+        } else if (sess->tsc && sess->tsc->status != TSC_STATUS_ABSENT &&
+                qos_flow->qfi == sess->tsc->qfi) {
+            ogs_warn("[SMF] NGAP TSC IE omitted (modify): QFI[%d] status[%d] "
+                     "reason[%s] -- flow proceeds on baseline 5QI",
+                     qos_flow->qfi, sess->tsc->status,
+                     sess->tsc->downgrade_reason);
+        }
     }
 
     return ogs_asn_encode(

@@ -208,13 +208,13 @@ void upf_n4_handle_session_establishment_request(
                     OGS_PFCP_OBJ_SESS_TYPE, pdr, restoration_indication);
     }
 
-    /* Phase 5 Step 1: record the PDU session type as UPF-local correlation
+    /* record the PDU session type as UPF-local correlation
      * state (logs creation for an Ethernet PDU session). Done independently of
      * the UE-IP block above, since an Ethernet session carries no UE IP. */
     if (req->pdn_type.presence == 1)
         upf_sess_set_correlation(sess, req->pdn_type.u8);
 
-    /* Phase 5 Step 3: the SMF requests creation of this session's 5GS-TSN-bridge
+    /* the SMF requests creation of this session's 5GS-TSN-bridge
      * port via the standard PFCP create_bridge_info_for_tsc IE (TS 29.244). Assign
      * a DS-TT port number; it is returned in created_bridge_info_for_tsc in the
      * establishment response (see upf_n4_build_session_establishment_response). */
@@ -281,7 +281,7 @@ void upf_n4_handle_session_modification_request(
         return;
     }
 
-    /* Phase 5 Step 3: the SMF carries the NW-TT Port Management Information
+    /* the SMF carries the NW-TT Port Management Information
      * Container (PMIC = the CNC's PSFP stream filter/gate tables) inside the
      * standard PFCP tsc_management_information IE (TS 29.244). Record receipt;
      * parsing/enforcing the PSFP tables is deferred to a later step. */
@@ -289,7 +289,7 @@ void upf_n4_handle_session_modification_request(
         ogs_pfcp_tlv_port_management_information_container_t *pmic =
             &req->tsc_management_information.port_management_information_container;
         if (pmic->presence) {
-            /* 202606 Step 08: program the NW-TT port — store the PMIC managed
+            /* program the NW-TT port — store the PMIC managed
              * object (PSFP stream filter + gate-control list). Best-effort:
              * the blob is retained on the port for the data-path to consult;
              * hard gate enforcement is a later refinement. */

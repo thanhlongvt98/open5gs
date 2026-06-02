@@ -247,7 +247,7 @@ int upf_sess_remove(upf_sess_t *sess)
         ogs_pfcp_ue_ip_free(sess->ipv6);
     }
 
-    /* 202606 Step 08: free the programmed NW-TT PMIC blob. */
+    /* free the programmed NW-TT PMIC blob. */
     if (sess->nwtt.pmic)
         ogs_free(sess->nwtt.pmic);
 
@@ -401,6 +401,46 @@ void upf_sess_learn_mac(upf_sess_t *sess, const uint8_t *mac)
             "[%02x:%02x:%02x:%02x:%02x:%02x] -> UPF-N4-SEID[0x%llx]",
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
             (unsigned long long)sess->upf_n4_seid);
+}
+
+void upf_sess_report_learned_mac(upf_sess_t *sess, const uint8_t *mac)
+{
+    ogs_pfcp_user_plane_report_t report;
+    ogs_pfcp_urr_t *urr = NULL;
+
+    ogs_assert(sess);
+    ogs_assert(mac);
+
+    if (sess->nwtt.mac_reported)
+        return;
+
+    /* The usage report is per-URR; ride the MAC on the session's first URR. */
+    urr = ogs_list_first(&sess->pfcp.urr_list);
+    if (!urr) {
+        ogs_warn("[UPF] no URR to carry MAC Addresses Detected; skip MAC report");
+        return;
+    }
+
+    memset(&report, 0, sizeof(report));
+    report.type.usage_report = 1;
+    report.num_of_usage_report = 1;
+    report.usage_report[0].id = urr->id;
+    report.usage_report[0].seqn = 0;
+    report.usage_report[0].rep_trigger.mac_addresses_reporting = 1;
+
+    /* MAC Addresses Detected IE payload: [count=1][6-byte MAC] (TS 29.244 §8.2.96). */
+    report.usage_report[0].mac_addresses_detected[0] = 1;
+    memcpy(&report.usage_report[0].mac_addresses_detected[1], mac, UPF_MAC_ALEN);
+    report.usage_report[0].mac_addresses_detected_len = 1 + UPF_MAC_ALEN;
+
+    if (upf_pfcp_send_session_report_request(sess, &report) != OGS_OK) {
+        ogs_error("[UPF] MAC Addresses Detected report send failed");
+        return;
+    }
+    sess->nwtt.mac_reported = true;
+    ogs_info("[UPF] reported DS-TT MAC [%02x:%02x:%02x:%02x:%02x:%02x] to SMF "
+            "(PFCP MAC Addresses Detected)",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
 upf_sess_t *upf_sess_find_by_mac(const uint8_t *mac)

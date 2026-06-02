@@ -57,6 +57,10 @@ bool pcf_sbi_send_smpolicycontrol_delete_notify(
 
 bool pcf_sbi_send_policyauthorization_terminate_notify(pcf_app_t *app);
 
+/* option-3: relay the 5GS bridge + DS-TT MAC to the TSN AF (/v1/bridges). */
+bool pcf_sbi_send_tsn_bridge_relay(
+        const char *supi, int bridge_id, int ds_tt_port, const char *ds_tt_mac);
+
 #ifdef __cplusplus
 }
 #endif

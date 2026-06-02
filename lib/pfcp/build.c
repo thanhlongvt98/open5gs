@@ -1058,6 +1058,21 @@ ogs_pkbuf_t *ogs_pfcp_build_session_report_request(
                 req->usage_report[i].time_of_last_packet.u32 =
                     report->usage_report[i].time_of_last_packet;
             }
+
+            /* Ethernet Traffic Information -> MAC Addresses Detected
+             * (TS 29.244 §8.2.96), used by the NW-TT to report a learned UE MAC
+             * so the SMF/PCF can bind the N5 app-session by ueMac. */
+            if (report->usage_report[i].mac_addresses_detected_len) {
+                req->usage_report[i].ethernet_traffic_information.presence = 1;
+                req->usage_report[i].ethernet_traffic_information.
+                    mac_addresses_detected.presence = 1;
+                req->usage_report[i].ethernet_traffic_information.
+                    mac_addresses_detected.data =
+                        report->usage_report[i].mac_addresses_detected;
+                req->usage_report[i].ethernet_traffic_information.
+                    mac_addresses_detected.len =
+                        report->usage_report[i].mac_addresses_detected_len;
+            }
         }
     }
 

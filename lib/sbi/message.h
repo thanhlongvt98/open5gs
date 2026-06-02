@@ -350,6 +350,7 @@ extern "C" {
         "slice-info-request-for-pdu-session"
 #define OGS_SBI_PARAM_FIELDS                        "fields"
 #define OGS_SBI_PARAM_IPV4ADDR                      "ipv4Addr"
+#define OGS_SBI_PARAM_MACADDR48                     "macAddr48"
 #define OGS_SBI_PARAM_IPV6PREFIX                    "ipv6Prefix"
 
 #define OGS_SBI_PARAM_FIELDS_GPSIS                       "gpsis"
@@ -508,6 +509,7 @@ typedef struct ogs_sbi_message_s {
 
         char *ipv4addr;
         char *ipv6prefix;
+        char *mac_addr; /* 202606: macAddr48 (BSF pcfBindings discovery) */
     } param;
 
     int res_status;

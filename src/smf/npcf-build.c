@@ -469,7 +469,7 @@ end:
 }
 
 /*
- * 202606 Step 03: Npcf_SMPolicyControl_Update (SMF -> PCF, TS 29.512 §4.2.4).
+ * Npcf_SMPolicyControl_Update (SMF -> PCF, TS 29.512 §4.2.4).
  * Report the 5GS TSN bridge information once the bridge port is established
  * (DS-TT port assigned by the UPF). POST {smPolicyUri}/update with
  * SmPolicyUpdateContextData { repPolicyCtrlReqTriggers:[TSN_BRIDGE_INFO],
@@ -484,9 +484,12 @@ ogs_sbi_request_t *smf_npcf_smpolicycontrol_build_update_tsn_bridge(
     OpenAPI_sm_policy_update_context_data_t SmPolicyUpdateContextData;
     OpenAPI_tsn_bridge_info_t TsnBridgeInfo;
     OpenAPI_list_t *TriggerList = NULL;
+    char dstt_mac_buf[18]; /* 202606: "xx:xx:xx:xx:xx:xx" + NUL */
 
     ogs_assert(sess);
     ogs_assert(sess->policy_association.resource_uri);
+    ogs_info("[SMF] build_update_tsn_bridge: enter (has_mac=%d)",
+            sess->tsc_bridge.has_ds_tt_mac);
 
     memset(&message, 0, sizeof(message));
     message.h.method = (char *)OGS_SBI_HTTP_METHOD_POST;
@@ -510,6 +513,17 @@ ogs_sbi_request_t *smf_npcf_smpolicycontrol_build_update_tsn_bridge(
     TsnBridgeInfo.bridge_id = (int)sess->smf_n4_seid;
     TsnBridgeInfo.is_dstt_port_num = true;
     TsnBridgeInfo.dstt_port_num = sess->tsc_bridge.ds_tt_port;
+    /* DS-TT port MAC (once learned via the NW-TT report) -> the PCF
+     * stores it + relays to the AF for ueMac N5 binding (TS 29.514). */
+    if (sess->tsc_bridge.has_ds_tt_mac) {
+        ogs_snprintf(dstt_mac_buf, sizeof(dstt_mac_buf),
+                "%02x:%02x:%02x:%02x:%02x:%02x",
+                sess->tsc_bridge.ds_tt_mac[0], sess->tsc_bridge.ds_tt_mac[1],
+                sess->tsc_bridge.ds_tt_mac[2], sess->tsc_bridge.ds_tt_mac[3],
+                sess->tsc_bridge.ds_tt_mac[4], sess->tsc_bridge.ds_tt_mac[5]);
+        /* Heap copy: the OpenAPI model frees dstt_addr; never a stack pointer. */
+        TsnBridgeInfo.dstt_addr = ogs_strdup(dstt_mac_buf);
+    }
     SmPolicyUpdateContextData.tsn_bridge_info = &TsnBridgeInfo;
 
     message.SmPolicyUpdateContextData = &SmPolicyUpdateContextData;
@@ -518,7 +532,11 @@ ogs_sbi_request_t *smf_npcf_smpolicycontrol_build_update_tsn_bridge(
     ogs_expect(request);
 
     OpenAPI_list_free(TriggerList);
+    if (TsnBridgeInfo.dstt_addr)
+        ogs_free(TsnBridgeInfo.dstt_addr);
     ogs_free(message.h.uri);
 
+    ogs_info("[SMF] tsnBridge update built (dsttAddr%s)",
+            sess->tsc_bridge.has_ds_tt_mac ? "=set" : "=none");
     return request;
 }

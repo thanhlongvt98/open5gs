@@ -99,7 +99,7 @@ static uint16_t _get_eth_type(uint8_t *data, uint len) {
     return 0;
 }
 
-/* Phase 5 Step 2: UPF-local Ethernet fast-path classification (observability only).
+/* UPF-local Ethernet fast-path classification (observability only).
  * Runs only for Ethernet PDU sessions (Step-1 sess->correlation.ethernet). */
 #define ETHERTYPE_GPTP 0x88F7  /* IEEE 802.1AS / 1588 gPTP (TS 23.501 §5.27.1.2.2.1) */
 
@@ -121,7 +121,7 @@ static const char *upf_eth_class_str(upf_eth_class_t c)
     }
 }
 
-/* Phase 5 Step 4: NW-TT MAC-learning bridge (TS 23.501 §5.8.2.5.3).
+/* NW-TT MAC-learning bridge (TS 23.501 §5.8.2.5.3).
  *
  * The Ethernet PDU session's N6 egress is a TAP device handing us full L2
  * frames. We use the first configured TAP as the bridge port (single Ethernet
@@ -223,7 +223,7 @@ static void _gtpv1_tun_recv_common_cb(
         uint16_t eth_type = _get_eth_type(recvbuf->data, recvbuf->len);
         uint8_t size;
 
-        /* Phase 5 Step 4: NW-TT bridge DL ingress. The full L2 frame is intact
+        /* NW-TT bridge DL ingress. The full L2 frame is intact
          * (dst MAC | src MAC | ethertype | ...). Resolve the destination MAC to
          * an Ethernet PDU session and GTP-U-encap the whole frame toward the
          * gNB; flood broadcast/multicast to all Ethernet sessions. Only IP-over-
@@ -279,16 +279,22 @@ static void _gtpv1_tun_recv_common_cb(
             ogs_pkbuf_free(replybuf);
             goto cleanup;
         }
-        /* Phase 5 Step 2: downlink gPTP detection (NW-TT DL ingress observed).
+        /* downlink gPTP detection (NW-TT DL ingress observed).
          * sess is not yet known here (pre-strip); the gate is interface-level
          * (has_eth = TAP/Ethernet). The full NW-TT DL ingress action (TSi
          * timestamp, correctionField/rateRatio update, TSi suffix; forward to
          * DS-TT per TS 23.501 §5.27.1.2.2.1) is deferred -- we only observe it,
          * then fall through to the existing drop. */
-        if (eth_type == ETHERTYPE_GPTP)
-            ogs_info("[UPF] Ethernet DL class[%s] ethertype[0x%04x] len[%d] "
-                     "(NW-TT gPTP ingress observed; timestamp/forward deferred)",
-                     upf_eth_class_str(UPF_ETH_CLASS_GPTP), eth_type, recvbuf->len);
+        if (eth_type == ETHERTYPE_GPTP) {
+            /* Known/expected NW-TT DL gPTP frame: observation + forward is
+             * deferred (see above). Drop it QUIETLY at debug level and skip the
+             * generic eth_type error + hexdump below, which otherwise floods the
+             * log ~1/sec with this benign, expected frame. */
+            ogs_debug("[UPF] Ethernet DL class[%s] ethertype[0x%04x] len[%d] "
+                      "(NW-TT gPTP ingress observed; timestamp/forward deferred)",
+                      upf_eth_class_str(UPF_ETH_CLASS_GPTP), eth_type, recvbuf->len);
+            goto cleanup;
+        }
 
         if (eth_type != ETHERTYPE_IP && eth_type != ETHERTYPE_IPV6) {
             ogs_error("[DROP] Invalid eth_type [%x]]", eth_type);
@@ -638,7 +644,7 @@ static void _gtpv1_u_recv_cb(short when, ogs_socket_t fd, void *data)
         far = pdr->far;
         ogs_assert(far);
 
-        /* Phase 5 Step 2: classify the uplink Ethernet frame (observability only).
+        /* classify the uplink Ethernet frame (observability only).
          * Done here at the matched-PDR point, before the IP-centric forwarding
          * logic below — which does not apply to an Ethernet PDU session (no UE IP).
          * The inner payload is the UE's Ethernet frame (GTP-U header already
@@ -652,15 +658,19 @@ static void _gtpv1_u_recv_cb(short when, ogs_socket_t fd, void *data)
                      pdr->qfi, (unsigned long long)sess->upf_n4_seid);
         }
 
-        /* Phase 5 Step 4: NW-TT bridge UL egress. For an Ethernet PDU session
+        /* NW-TT bridge UL egress. For an Ethernet PDU session
          * the GTP-U payload is the UE's raw L2 frame (no UE IP). Learn the inner
          * source MAC for DL return traffic, then deliver the frame verbatim to
          * the N6 TAP bridge port. (TS 23.501 §5.6.10.2, §5.8.2.5.3.) */
         if (sess->correlation.ethernet) {
             ogs_pfcp_dev_t *eth_dev = upf_eth_bridge_dev();
 
-            if (pkbuf->len >= 2 * UPF_MAC_ALEN)
+            if (pkbuf->len >= 2 * UPF_MAC_ALEN) {
                 upf_sess_learn_mac(sess, pkbuf->data + UPF_MAC_ALEN);
+                /* report the DS-TT MAC to the SMF (once) so the PCF can
+                 * bind the N5 app-session by ueMac. */
+                upf_sess_report_learned_mac(sess, pkbuf->data + UPF_MAC_ALEN);
+            }
 
             if (far->dst_if == OGS_PFCP_INTERFACE_CORE && eth_dev) {
                 for (i = 0; i < pdr->num_of_urr; i++)
