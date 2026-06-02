@@ -1632,7 +1632,48 @@ OpenAPI_qos_data_t *ogs_sbi_build_qos_data(ogs_pcc_rule_t *pcc_rule)
         QosData->gbr_dl = ogs_sbi_bitrate_to_string(
                 pcc_rule->qos.gbr.downlink, OGS_SBI_BITRATE_BPS);
 
+    /* For an operator-defined dynamic 5QI (TS 23.501 §5.7.4) the QosData carries
+     * only the assigned (dynamic) 5QI value in `5qi` (already set from
+     * pcc_rule->qos.index above) plus ARP and GBR/MBR. The 5G QoS
+     * characteristics travel separately in the SmPolicyDecision `qosChars`
+     * (TS 29.512 §4.2.6.6.3), built by ogs_sbi_build_qos_characteristics(). */
+
     return QosData;
+}
+
+OpenAPI_qos_characteristics_t *ogs_sbi_build_qos_characteristics(
+        ogs_pcc_rule_t *pcc_rule)
+{
+    ogs_dyn_5qi_t *dyn = NULL;
+    char *per = NULL;
+
+    ogs_assert(pcc_rule);
+    if (!pcc_rule->qos.dyn_5qi.is_dynamic)
+        return NULL;
+
+    dyn = &pcc_rule->qos.dyn_5qi;
+
+    /* TS 29.512 §5.6.2.16 QosCharacteristics: the authorized 5G QoS
+     * characteristics for the dynamically assigned 5QI. resourceType for a TSC
+     * flow is delay-critical GBR (TS 23.501 §5.27.3). packetErrorRate is the
+     * TS 29.571 PacketErrRate string form "<scalar>E-<exponent>". */
+    per = ogs_msprintf("%uE-%u",
+            dyn->packet_error_rate.scalar, dyn->packet_error_rate.exponent);
+    ogs_assert(per);
+
+    return OpenAPI_qos_characteristics_create(
+            dyn->five_qi,
+            dyn->delay_critical ?
+                OpenAPI_qos_resource_type_CRITICAL_GBR :
+                OpenAPI_qos_resource_type_NON_CRITICAL_GBR,
+            dyn->priority_level,
+            dyn->packet_delay_budget,
+            per,
+            dyn->averaging_window ? true : false,
+            dyn->averaging_window,
+            dyn->max_data_burst_volume ? true : false,
+            dyn->max_data_burst_volume,
+            false, 0);
 }
 
 void ogs_sbi_free_qos_data(OpenAPI_qos_data_t *QosData)
@@ -1644,6 +1685,7 @@ void ogs_sbi_free_qos_data(OpenAPI_qos_data_t *QosData)
     if (QosData->maxbr_dl) ogs_free(QosData->maxbr_dl);
     if (QosData->gbr_ul) ogs_free(QosData->gbr_ul);
     if (QosData->gbr_dl) ogs_free(QosData->gbr_dl);
+    if (QosData->packet_error_rate) ogs_free(QosData->packet_error_rate);
 
     ogs_free(QosData);
 }

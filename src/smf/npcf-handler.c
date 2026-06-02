@@ -57,10 +57,25 @@ static void smf_tsc_ingest_pcc_rule(
         tsc->periodicity_us = (uint64_t)t->periodicity;
     if (t->is_sur_time_in_time)
         tsc->survival_time_us = (uint32_t)t->sur_time_in_time;
-    if (t->burst_arrival_time)
-        tsc->burst_arrival_time_tsn =
-            (uint64_t)strtoull(t->burst_arrival_time, NULL, 0);
-    /* burst_arrival_time_5g left 0: TSN->5G clock conversion deferred (Phase 7) */
+    if (t->burst_arrival_time) {
+        /* TSCAI burstArrivalTime is an RFC3339 DateTime referenced to the
+         * external (TSN) grandmaster (TS 29.514 §5.6.2.39); parse it to a
+         * nanosecond value (ogs_time_t is microseconds). */
+        ogs_time_t bat_us = 0;
+        if (ogs_sbi_time_from_string(&bat_us, t->burst_arrival_time))
+            tsc->burst_arrival_time_tsn = (uint64_t)bat_us * 1000;
+        else
+            tsc->burst_arrival_time_tsn =
+                (uint64_t)strtoull(t->burst_arrival_time, NULL, 0);
+        /* TSCAC -> TSCAI clock-domain conversion (TS 23.501 §5.27.2.4): the
+         * external-GM burst arrival time is shifted to the 5GS clock by the
+         * external-minus-5GS time offset measured by the NW-TT/UPF and reported
+         * over N4 (TS 29.244 §5.26.4). The offset is 0 in a single-time-domain
+         * deployment, so this reduces to identity but is no longer hardcoded. */
+        tsc->burst_arrival_time_5g =
+            (uint64_t)((int64_t)tsc->burst_arrival_time_tsn -
+                    tsc->clock_drift_offset_ns);
+    }
 
     if (dl && ul)
         tsc->direction = TSC_BOTH;
@@ -92,7 +107,7 @@ static void smf_tsc_ingest_pcc_rule(
 static void update_authorized_pcc_rule_and_qos(
         smf_sess_t *sess, OpenAPI_sm_policy_decision_t *SmPolicyDecision)
 {
-    OpenAPI_lnode_t *node = NULL, *node2 = NULL;
+    OpenAPI_lnode_t *node = NULL, *node2 = NULL, *node3 = NULL;
 
     ogs_assert(sess);
     ogs_assert(SmPolicyDecision);
@@ -318,6 +333,43 @@ static void update_authorized_pcc_rule_and_qos(
             if (QosData->gbr_dl)
                 pcc_rule->qos.gbr.downlink =
                     ogs_sbi_bitrate_from_string(QosData->gbr_dl);
+
+            /* Operator-defined Dynamic 5QI (TS 29.512 §4.2.6.6.3): the authorized
+             * 5G QoS characteristics travel in the SmPolicyDecision qosChars,
+             * keyed by the dynamic 5QI value referenced in QosData->_5qi. When a
+             * matching entry is present, populate the dynamic descriptor so the
+             * SMF emits an NGAP Dynamic5QIDescriptor (TS 38.413 §9.3.1.18). */
+            if (SmPolicyDecision->qos_chars) {
+                OpenAPI_list_for_each(SmPolicyDecision->qos_chars, node3) {
+                    OpenAPI_map_t *QosCharsMap = node3->data;
+                    OpenAPI_qos_characteristics_t *QosChars =
+                        QosCharsMap ? QosCharsMap->value : NULL;
+                    ogs_dyn_5qi_t *dyn = &pcc_rule->qos.dyn_5qi;
+
+                    if (!QosChars || QosChars->_5qi != QosData->_5qi)
+                        continue;
+
+                    dyn->is_dynamic = true;
+                    dyn->five_qi = QosChars->_5qi;
+                    dyn->delay_critical = (QosChars->resource_type ==
+                            OpenAPI_qos_resource_type_CRITICAL_GBR);
+                    dyn->priority_level = QosChars->priority_level;
+                    dyn->packet_delay_budget = QosChars->packet_delay_budget;
+                    if (QosChars->packet_error_rate) {
+                        unsigned int scalar = 0, exponent = 0;
+                        if (sscanf(QosChars->packet_error_rate, "%uE-%u",
+                                    &scalar, &exponent) == 2) {
+                            dyn->packet_error_rate.scalar = scalar;
+                            dyn->packet_error_rate.exponent = exponent;
+                        }
+                    }
+                    if (QosChars->is_averaging_window)
+                        dyn->averaging_window = QosChars->averaging_window;
+                    if (QosChars->is_max_data_burst_vol)
+                        dyn->max_data_burst_volume = QosChars->max_data_burst_vol;
+                    break;
+                }
+            }
 
             if (pcc_rule->qos.mbr.downlink || pcc_rule->qos.mbr.uplink ||
                 pcc_rule->qos.gbr.downlink || pcc_rule->qos.gbr.uplink) {

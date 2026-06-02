@@ -440,6 +440,27 @@ typedef struct ogs_bitrate_s {
 
 int ogs_check_br_conf(ogs_bitrate_t *br);
 
+/*
+ * Operator-defined Dynamic 5QI characteristics (TS 23.501 R17 §5.7.3).
+ * Carried CNC -> AF -> N5 -> PCF -> SMF so the SMF emits an NGAP
+ * Dynamic5QIDescriptor (TS 38.413 §9.3.1.18) instead of a standardized 5QI.
+ * When is_dynamic is false the QoS is a standardized (non-dynamic) 5QI and
+ * these fields are ignored.
+ */
+typedef struct ogs_dyn_5qi_s {
+    bool        is_dynamic;
+    uint8_t     five_qi;                /* Optional reference 5QI (§5.7.4); 0 = absent */
+    uint8_t     priority_level;         /* PriorityLevelQos 1..127 (§5.7.3.3) */
+    uint16_t    packet_delay_budget;    /* PacketDelayBudget, NGAP units (§5.7.3.4) */
+    struct {
+        uint8_t scalar;                 /* pERScalar 0..9 */
+        uint8_t exponent;               /* pERExponent 0..9 */
+    } packet_error_rate;                /* PacketErrorRate (§5.7.3.5) */
+    bool        delay_critical;         /* Delay-critical resource type (§5.7.3.2) */
+    uint16_t    averaging_window;       /* AveragingWindow ms (§5.7.3.6); 0 = absent */
+    uint16_t    max_data_burst_volume;  /* MDBV bytes (§5.7.3.7); 0 = absent */
+} ogs_dyn_5qi_t;
+
 /**********************************
  * QoS Structure                 */
 typedef struct ogs_qos_s {
@@ -480,6 +501,11 @@ typedef struct ogs_qos_s {
 
     ogs_bitrate_t   mbr;  /* Maxmimum Bit Rate (MBR) */
     ogs_bitrate_t   gbr;  /* Guaranteed Bit Rate (GBR) */
+
+    /* Operator-defined Dynamic 5QI characteristics (TS 23.501 §5.7.3). When
+     * dyn_5qi.is_dynamic is set the SMF emits an NGAP Dynamic5QIDescriptor and
+     * `index` carries the (optional) non-standardized 5QI value. */
+    ogs_dyn_5qi_t   dyn_5qi;
 } ogs_qos_t;
 
 int ogs_check_qos_conf(ogs_qos_t *qos);
@@ -981,6 +1007,10 @@ typedef struct ogs_media_component_s {
     /* Phase 6: TSCAI assistance from the AF MediaComponent (TS 29.514). */
     ogs_tscai_input_t   tscai_input_dl;
     ogs_tscai_input_t   tscai_input_ul;
+
+    /* CNC-declared Dynamic 5QI characteristics from the AF MediaComponent
+     * (proprietary N5 extension; TS 23.501 §5.7.3 semantics). */
+    ogs_dyn_5qi_t       dyn_5qi;
 } ogs_media_component_t;
 
 #define OGS_MAX_NUM_OF_SPT 20

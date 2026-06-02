@@ -39,6 +39,12 @@ typedef struct {
     uint64_t   burst_arrival_time_tsn;  /* BEFORE clock conversion: TSN clock*/
     uint64_t   burst_arrival_time_5g;   /* AFTER  clock conversion: 5G clock */
                                         /* See TS 23.501 §5.27.2             */
+    /* External-time minus 5GS-time offset (ns) used to convert the TSC
+     * Assistance Container's external-GM burst arrival time to the 5GS clock
+     * (TS 23.501 §5.27.2.4). Measured by the NW-TT/UPF and reported to the SMF
+     * via the PFCP Clock Drift Report (TS 29.244 §5.26.4 / §8.2.149). 0 in a
+     * single-time-domain deployment where the 5GS shares the external GM. */
+    int64_t    clock_drift_offset_ns;
     uint32_t   survival_time_us;        /* TSCAI Survival Time; 0 = absent   */
     enum { TSC_UL, TSC_DL, TSC_BOTH } direction;  /* TSCAI flow direction    */
 

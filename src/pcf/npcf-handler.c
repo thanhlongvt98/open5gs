@@ -688,6 +688,82 @@ bool pcf_npcf_smpolicycontrol_handle_update(pcf_sess_t *sess,
     return true;
 }
 
+/* PCF QoS mapping table: standardized Delay-critical GBR 5QIs from TS 23.501 R17
+ * Table 5.7.4-1, restricted to the set the gNB knows from its default config
+ * (CU-CP + DU) so no per-5QI gNB qos block is needed. */
+static const struct {
+    uint8_t  five_qi;
+    uint8_t  priority;      /* Priority Level (lower = higher priority). */
+    uint16_t pdb_ms;        /* Packet Delay Budget, ms. */
+    uint16_t mdbv;          /* Maximum Data Burst Volume, bytes. */
+} pcf_tsc_5qi_table[] = {
+    { 82, 19, 10,  255  },
+    { 83, 22, 10,  1354 },
+    { 84, 24, 30,  1354 },
+    { 85, 21, 5,   255  },
+    { 86, 18, 5,   1354 },
+};
+
+/* Fallback 5QI when the AF's tsnQos carries no usable requirement. */
+#define PCF_TSC_5QI_DEFAULT 84
+
+/* Map the AF's TsnQosContainer (TS 29.514 §5.6.2.35) to a standardized
+ * delay-critical-GBR 5QI (PCF QoS mapping, TS 23.501 §5.28.4 / §5.27.3 point 5).
+ * The PCF mapping table maps the TSN QoS information (priority / PDB / TSC burst
+ * size) to the 5GS QoS profile: the selected 5QI's standardized characteristics
+ * (Table 5.7.4-1) must satisfy the requirement — MDBV >= burst (§5.27.3 point 1),
+ * PDB <= requested (point 2), priority matching the traffic class.
+ *
+ * The TSC traffic pattern (TSCAI) is signalled SEPARATELY and comes from the CNC
+ * (tscaiInput) — it is NOT derived from the 5QI's table values, so each stream
+ * keeps its CNC-computed periodicity/burst-arrival/survival. Here the PCF only
+ * selects the QoS-flow 5QI. */
+static void pcf_map_tsn_qos_to_5qi(ogs_dyn_5qi_t *dyn,
+        bool has_prio, int prio_level,
+        bool has_pdb, int pack_delay,
+        bool has_burst, int burst_size)
+{
+    const size_t n = sizeof(pcf_tsc_5qi_table) / sizeof(pcf_tsc_5qi_table[0]);
+    uint8_t selected = PCF_TSC_5QI_DEFAULT;
+    size_t i;
+
+    /* Standardized 5QI -> NGAP NonDynamic5QIDescriptor (dynamic path stays off). */
+    dyn->is_dynamic = false;
+    dyn->delay_critical = true;
+
+    /* Tier 1: exact (priority, PDB) match, with MDBV satisfying the burst if given. */
+    if (has_prio && has_pdb) {
+        for (i = 0; i < n; i++) {
+            if (pcf_tsc_5qi_table[i].priority == (uint8_t)prio_level &&
+                    pcf_tsc_5qi_table[i].pdb_ms == (uint16_t)pack_delay &&
+                    (!has_burst || pcf_tsc_5qi_table[i].mdbv >= (uint16_t)burst_size)) {
+                dyn->five_qi = pcf_tsc_5qi_table[i].five_qi;
+                return;
+            }
+        }
+    }
+
+    /* Tier 2: best satisfying row — tightest PDB that still meets the requirement
+     * (PDB <= requested when given, MDBV >= burst when given). */
+    if (has_pdb || has_burst) {
+        bool found = false;
+        uint16_t best_pdb = 0;
+        for (i = 0; i < n; i++) {
+            if (has_pdb && pcf_tsc_5qi_table[i].pdb_ms > (uint16_t)pack_delay)
+                continue;
+            if (has_burst && pcf_tsc_5qi_table[i].mdbv < (uint16_t)burst_size)
+                continue;
+            if (!found || pcf_tsc_5qi_table[i].pdb_ms < best_pdb) {
+                best_pdb = pcf_tsc_5qi_table[i].pdb_ms;
+                selected = pcf_tsc_5qi_table[i].five_qi;
+                found = true;
+            }
+        }
+    }
+
+    dyn->five_qi = selected;
+}
+
 bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
         ogs_sbi_stream_t *stream, ogs_sbi_message_t *recvmsg)
 {
@@ -738,6 +814,9 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
     OpenAPI_list_t *QosDecisionList = NULL;
     OpenAPI_map_t *QosDecisionMap = NULL;
     OpenAPI_qos_data_t *QosData = NULL;
+    OpenAPI_list_t *QosCharsList = NULL;
+    OpenAPI_map_t *QosCharsMap = NULL;
+    OpenAPI_qos_characteristics_t *QosChars = NULL;
 
     OpenAPI_lnode_t *node = NULL, *node2 = NULL, *node3 = NULL;
 
@@ -886,6 +965,18 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
                     tul->sur_time_in_time = Tin->sur_time_in_time;
                 }
 
+                /* Map the AF's TsnQosContainer to a standardized delay-critical
+                 * GBR 5QI (TS 29.514 §5.6.2.35 -> TS 23.501 §5.28.4); the CNC-defined
+                 * TSCAI is carried separately (tscaiInput), unaffected by the 5QI. */
+                if (MediaComponent->tsn_qos)
+                    pcf_map_tsn_qos_to_5qi(&media_component->dyn_5qi,
+                            MediaComponent->tsn_qos->is_tsc_prio_level,
+                            MediaComponent->tsn_qos->tsc_prio_level,
+                            MediaComponent->tsn_qos->is_tsc_pack_delay,
+                            MediaComponent->tsn_qos->tsc_pack_delay,
+                            MediaComponent->tsn_qos->is_max_tsc_burst_size,
+                            MediaComponent->tsn_qos->max_tsc_burst_size);
+
                 SubComponentList = MediaComponent->med_sub_comps;
                 OpenAPI_list_for_each(SubComponentList, node2) {
                     if (media_component->num_of_sub >=
@@ -1001,6 +1092,8 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
 
     QosDecisionList = OpenAPI_list_create();
     ogs_assert(QosDecisionList);
+    QosCharsList = OpenAPI_list_create();
+    ogs_assert(QosCharsList);
 
     for (i = 0; i < ims_data.num_of_media_component; i++) {
         int flow_presence = 0;
@@ -1026,6 +1119,12 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
             break;
         case OpenAPI_media_type_CONTROL:
             qos_index = OGS_QOS_INDEX_5;
+            break;
+        case OpenAPI_media_type_DATA:
+            /* TSN/Ethernet flows use medType DATA (TS 29.514 §5.6.2.7); take the
+             * baseline QoS template from the provisioned index 1 PCC rule — the
+             * dynamic 5QI derived from tsnQos overrides it below. */
+            qos_index = OGS_QOS_INDEX_1;
             break;
         default:
             strerror = ogs_msprintf("[%s:%d] Unknown Media-Type [%d]",
@@ -1169,6 +1268,17 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
         ogs_assert(QosDecisionMap);
 
         OpenAPI_list_add(QosDecisionList, QosDecisionMap);
+
+        /* For a dynamically-assigned 5QI, signal the authorized QoS
+         * characteristics in the SmPolicyDecision qosChars, keyed by the 5QI
+         * value (TS 29.512 §4.2.6.6.3). QosData->5qi references this entry. */
+        QosChars = ogs_sbi_build_qos_characteristics(pcc_rule);
+        if (QosChars) {
+            QosCharsMap = OpenAPI_map_create(
+                    ogs_msprintf("%d", QosChars->_5qi), QosChars);
+            ogs_assert(QosCharsMap);
+            OpenAPI_list_add(QosCharsList, QosCharsMap);
+        }
     }
 
     if (PccRuleList->count)
@@ -1176,6 +1286,9 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
 
     if (QosDecisionList->count)
         SmPolicyDecision.qos_decs = QosDecisionList;
+
+    if (QosCharsList->count)
+        SmPolicyDecision.qos_chars = QosCharsList;
 
     memset(&sendmsg, 0, sizeof(sendmsg));
 
@@ -1229,6 +1342,19 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
     }
     OpenAPI_list_free(QosDecisionList);
 
+    OpenAPI_list_for_each(QosCharsList, node) {
+        QosCharsMap = node->data;
+        if (QosCharsMap) {
+            QosChars = QosCharsMap->value;
+            if (QosChars)
+                OpenAPI_qos_characteristics_free(QosChars);
+            if (QosCharsMap->key)
+                ogs_free(QosCharsMap->key);
+            ogs_free(QosCharsMap);
+        }
+    }
+    OpenAPI_list_free(QosCharsList);
+
     ogs_ims_data_free(&ims_data);
     OGS_SESSION_DATA_FREE(&session_data);
 
@@ -1264,6 +1390,19 @@ cleanup:
         }
     }
     OpenAPI_list_free(QosDecisionList);
+
+    OpenAPI_list_for_each(QosCharsList, node) {
+        QosCharsMap = node->data;
+        if (QosCharsMap) {
+            QosChars = QosCharsMap->value;
+            if (QosChars)
+                OpenAPI_qos_characteristics_free(QosChars);
+            if (QosCharsMap->key)
+                ogs_free(QosCharsMap->key);
+            ogs_free(QosCharsMap);
+        }
+    }
+    OpenAPI_list_free(QosCharsList);
 
     ogs_ims_data_free(&ims_data);
     OGS_SESSION_DATA_FREE(&session_data);
@@ -1311,6 +1450,9 @@ bool pcf_npcf_policyauthorization_handle_update(
     OpenAPI_list_t *QosDecisionList = NULL;
     OpenAPI_map_t *QosDecisionMap = NULL;
     OpenAPI_qos_data_t *QosData = NULL;
+    OpenAPI_list_t *QosCharsList = NULL;
+    OpenAPI_map_t *QosCharsMap = NULL;
+    OpenAPI_qos_characteristics_t *QosChars = NULL;
 
     OpenAPI_lnode_t *node = NULL, *node2 = NULL, *node3 = NULL;
 
@@ -1425,6 +1567,18 @@ bool pcf_npcf_policyauthorization_handle_update(
                     tul->sur_time_in_time = Tin->sur_time_in_time;
                 }
 
+                /* Map the AF's TsnQosContainer to a standardized delay-critical
+                 * GBR 5QI (TS 29.514 §5.6.2.35 -> TS 23.501 §5.28.4); the CNC-defined
+                 * TSCAI is carried separately (tscaiInput), unaffected by the 5QI. */
+                if (MediaComponent->tsn_qos)
+                    pcf_map_tsn_qos_to_5qi(&media_component->dyn_5qi,
+                            MediaComponent->tsn_qos->is_tsc_prio_level,
+                            MediaComponent->tsn_qos->tsc_prio_level,
+                            MediaComponent->tsn_qos->is_tsc_pack_delay,
+                            MediaComponent->tsn_qos->tsc_pack_delay,
+                            MediaComponent->tsn_qos->is_max_tsc_burst_size,
+                            MediaComponent->tsn_qos->max_tsc_burst_size);
+
                 SubComponentList = MediaComponent->med_sub_comps;
                 OpenAPI_list_for_each(SubComponentList, node2) {
                     if (media_component->num_of_sub >=
@@ -1514,6 +1668,8 @@ bool pcf_npcf_policyauthorization_handle_update(
 
     QosDecisionList = OpenAPI_list_create();
     ogs_assert(QosDecisionList);
+    QosCharsList = OpenAPI_list_create();
+    ogs_assert(QosCharsList);
 
     for (i = 0; i < ims_data.num_of_media_component; i++) {
         int flow_presence = 0;
@@ -1539,6 +1695,12 @@ bool pcf_npcf_policyauthorization_handle_update(
             break;
         case OpenAPI_media_type_CONTROL:
             qos_index = OGS_QOS_INDEX_5;
+            break;
+        case OpenAPI_media_type_DATA:
+            /* TSN/Ethernet flows use medType DATA (TS 29.514 §5.6.2.7); take the
+             * baseline QoS template from the provisioned index 1 PCC rule — the
+             * dynamic 5QI derived from tsnQos overrides it below. */
+            qos_index = OGS_QOS_INDEX_1;
             break;
         default:
             strerror = ogs_msprintf("[%s:%d] Unknown Media-Type [%d]",
@@ -1681,6 +1843,17 @@ bool pcf_npcf_policyauthorization_handle_update(
         ogs_assert(QosDecisionMap);
 
         OpenAPI_list_add(QosDecisionList, QosDecisionMap);
+
+        /* For a dynamically-assigned 5QI, signal the authorized QoS
+         * characteristics in the SmPolicyDecision qosChars, keyed by the 5QI
+         * value (TS 29.512 §4.2.6.6.3). QosData->5qi references this entry. */
+        QosChars = ogs_sbi_build_qos_characteristics(pcc_rule);
+        if (QosChars) {
+            QosCharsMap = OpenAPI_map_create(
+                    ogs_msprintf("%d", QosChars->_5qi), QosChars);
+            ogs_assert(QosCharsMap);
+            OpenAPI_list_add(QosCharsList, QosCharsMap);
+        }
     }
 
     if (PccRuleList->count)
@@ -1688,6 +1861,9 @@ bool pcf_npcf_policyauthorization_handle_update(
 
     if (QosDecisionList->count)
         SmPolicyDecision.qos_decs = QosDecisionList;
+
+    if (QosCharsList->count)
+        SmPolicyDecision.qos_chars = QosCharsList;
 
     memset(&sendmsg, 0, sizeof(sendmsg));
 
@@ -1725,6 +1901,19 @@ bool pcf_npcf_policyauthorization_handle_update(
     }
     OpenAPI_list_free(QosDecisionList);
 
+    OpenAPI_list_for_each(QosCharsList, node) {
+        QosCharsMap = node->data;
+        if (QosCharsMap) {
+            QosChars = QosCharsMap->value;
+            if (QosChars)
+                OpenAPI_qos_characteristics_free(QosChars);
+            if (QosCharsMap->key)
+                ogs_free(QosCharsMap->key);
+            ogs_free(QosCharsMap);
+        }
+    }
+    OpenAPI_list_free(QosCharsList);
+
     ogs_ims_data_free(&ims_data);
     OGS_SESSION_DATA_FREE(&session_data);
 
@@ -1760,6 +1949,19 @@ cleanup:
         }
     }
     OpenAPI_list_free(QosDecisionList);
+
+    OpenAPI_list_for_each(QosCharsList, node) {
+        QosCharsMap = node->data;
+        if (QosCharsMap) {
+            QosChars = QosCharsMap->value;
+            if (QosChars)
+                OpenAPI_qos_characteristics_free(QosChars);
+            if (QosCharsMap->key)
+                ogs_free(QosCharsMap->key);
+            ogs_free(QosCharsMap);
+        }
+    }
+    OpenAPI_list_free(QosCharsList);
 
     ogs_ims_data_free(&ims_data);
     OGS_SESSION_DATA_FREE(&session_data);

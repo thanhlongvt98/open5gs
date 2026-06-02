@@ -1171,5 +1171,14 @@ int ogs_pcc_rule_update_qos_from_media(
     pcc_rule->tscai_input_dl = media_component->tscai_input_dl;
     pcc_rule->tscai_input_ul = media_component->tscai_input_ul;
 
+    /* Carry the PCF-assigned 5QI for the TSC flow onto the PCC rule QoS. The PCF
+     * selects a standardized delay-critical-GBR 5QI (is_dynamic=false) so the SMF
+     * emits a NonDynamic5QIDescriptor; the TSCAI is carried separately. (When
+     * is_dynamic is set instead, the same field carries the dynamic 5QI value and
+     * the characteristics travel in qosChars, TS 29.512 §4.2.6.6.3.) */
+    pcc_rule->qos.dyn_5qi = media_component->dyn_5qi;
+    if (pcc_rule->qos.dyn_5qi.five_qi)
+        pcc_rule->qos.index = pcc_rule->qos.dyn_5qi.five_qi;
+
     return OGS_OK;
 }

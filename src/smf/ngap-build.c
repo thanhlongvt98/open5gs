@@ -85,6 +85,71 @@ static NGAP_TSCAssistanceInformation_t *smf_ngap_build_tsc_assistance(
     return tscai;
 }
 
+/*
+ * Fill the NGAP QoS Characteristics IE from the flow QoS. When the QoS carries
+ * operator-defined Dynamic 5QI characteristics (TS 23.501 §5.7.3) a
+ * Dynamic5QIDescriptor is built (TS 38.413 §9.3.1.18); otherwise the
+ * standardized NonDynamic5QIDescriptor is used.
+ */
+static void smf_ngap_build_qos_characteristics(
+        NGAP_QosCharacteristics_t *qosCharacteristics, ogs_qos_t *qos)
+{
+    ogs_assert(qosCharacteristics);
+    ogs_assert(qos);
+
+    if (qos->dyn_5qi.is_dynamic) {
+        NGAP_Dynamic5QIDescriptor_t *dynamic5QI =
+            CALLOC(1, sizeof(NGAP_Dynamic5QIDescriptor_t));
+        ogs_assert(dynamic5QI);
+        qosCharacteristics->present = NGAP_QosCharacteristics_PR_dynamic5QI;
+        qosCharacteristics->choice.dynamic5QI = dynamic5QI;
+
+        dynamic5QI->priorityLevelQos = qos->dyn_5qi.priority_level;
+        dynamic5QI->packetDelayBudget = qos->dyn_5qi.packet_delay_budget;
+        dynamic5QI->packetErrorRate.pERScalar =
+            qos->dyn_5qi.packet_error_rate.scalar;
+        dynamic5QI->packetErrorRate.pERExponent =
+            qos->dyn_5qi.packet_error_rate.exponent;
+
+        /* Optional reference 5QI (TS 38.413 §9.3.1.18): the gNB derives its DRB
+         * configuration from this standardized 5QI; the dynamic characteristics
+         * above override the standardized ones for the scheduler. */
+        if (qos->index) {
+            dynamic5QI->fiveQI = CALLOC(1, sizeof(NGAP_FiveQI_t));
+            ogs_assert(dynamic5QI->fiveQI);
+            *dynamic5QI->fiveQI = qos->index;
+        }
+
+        if (qos->dyn_5qi.delay_critical) {
+            dynamic5QI->delayCritical =
+                CALLOC(1, sizeof(NGAP_DelayCritical_t));
+            ogs_assert(dynamic5QI->delayCritical);
+            *dynamic5QI->delayCritical = NGAP_DelayCritical_delay_critical;
+        }
+        if (qos->dyn_5qi.averaging_window) {
+            dynamic5QI->averagingWindow =
+                CALLOC(1, sizeof(NGAP_AveragingWindow_t));
+            ogs_assert(dynamic5QI->averagingWindow);
+            *dynamic5QI->averagingWindow = qos->dyn_5qi.averaging_window;
+        }
+        if (qos->dyn_5qi.max_data_burst_volume) {
+            dynamic5QI->maximumDataBurstVolume =
+                CALLOC(1, sizeof(NGAP_MaximumDataBurstVolume_t));
+            ogs_assert(dynamic5QI->maximumDataBurstVolume);
+            *dynamic5QI->maximumDataBurstVolume =
+                qos->dyn_5qi.max_data_burst_volume;
+        }
+        return;
+    }
+
+    NGAP_NonDynamic5QIDescriptor_t *nonDynamic5QI =
+        CALLOC(1, sizeof(NGAP_NonDynamic5QIDescriptor_t));
+    ogs_assert(nonDynamic5QI);
+    qosCharacteristics->present = NGAP_QosCharacteristics_PR_nonDynamic5QI;
+    qosCharacteristics->choice.nonDynamic5QI = nonDynamic5QI;
+    nonDynamic5QI->fiveQI = qos->index;
+}
+
 ogs_pkbuf_t *ngap_build_pdu_session_resource_setup_request_transfer(
         smf_sess_t *sess)
 {
@@ -105,7 +170,6 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_setup_request_transfer(
     NGAP_QosFlowIdentifier_t *qosFlowIdentifier = NULL;
     NGAP_QosFlowLevelQosParameters_t *qosFlowLevelQosParameters = NULL;
     NGAP_QosCharacteristics_t *qosCharacteristics = NULL;
-    NGAP_NonDynamic5QIDescriptor_t *nonDynamic5QI = NULL;
     NGAP_AllocationAndRetentionPriority_t *allocationAndRetentionPriority;
     NGAP_GBR_QosInformation_t *gBR_QosInformation = NULL;
 
@@ -307,14 +371,9 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_setup_request_transfer(
         allocationAndRetentionPriority =
             &qosFlowLevelQosParameters->allocationAndRetentionPriority;
         qosCharacteristics = &qosFlowLevelQosParameters->qosCharacteristics;
-        nonDynamic5QI = CALLOC(1, sizeof(struct NGAP_NonDynamic5QIDescriptor));
-        ogs_assert(nonDynamic5QI);
-        qosCharacteristics->choice.nonDynamic5QI = nonDynamic5QI;
-        qosCharacteristics->present = NGAP_QosCharacteristics_PR_nonDynamic5QI;
+        smf_ngap_build_qos_characteristics(qosCharacteristics, &qos_flow->qos);
 
         *qosFlowIdentifier = qos_flow->qfi;
-
-        nonDynamic5QI->fiveQI = qos_flow->qos.index;
 
         allocationAndRetentionPriority->priorityLevelARP =
             qos_flow->qos.arp.priority_level;
@@ -427,7 +486,6 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_modify_request_transfer(
     NGAP_QosFlowIdentifier_t *qosFlowIdentifier = NULL;
     NGAP_QosFlowLevelQosParameters_t *qosFlowLevelQosParameters = NULL;
     NGAP_QosCharacteristics_t *qosCharacteristics = NULL;
-    NGAP_NonDynamic5QIDescriptor_t *nonDynamic5QI = NULL;
     NGAP_AllocationAndRetentionPriority_t *allocationAndRetentionPriority;
     NGAP_GBR_QosInformation_t *gBR_QosInformation;
 
@@ -463,14 +521,9 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_modify_request_transfer(
         allocationAndRetentionPriority =
             &qosFlowLevelQosParameters->allocationAndRetentionPriority;
         qosCharacteristics = &qosFlowLevelQosParameters->qosCharacteristics;
-
-        qosCharacteristics->present = NGAP_QosCharacteristics_PR_nonDynamic5QI;
-        qosCharacteristics->choice.nonDynamic5QI =
-            nonDynamic5QI = CALLOC(1, sizeof(struct NGAP_NonDynamic5QIDescriptor));
+        smf_ngap_build_qos_characteristics(qosCharacteristics, &qos_flow->qos);
 
         *qosFlowIdentifier = qos_flow->qfi;
-
-        nonDynamic5QI->fiveQI = qos_flow->qos.index;
 
         allocationAndRetentionPriority->priorityLevelARP =
             qos_flow->qos.arp.priority_level;
