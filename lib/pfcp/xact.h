@@ -117,6 +117,11 @@ typedef struct ogs_pfcp_xact_s {
 #define OGS_PFCP_MODIFY_URR_TIME_QUOTA ((uint64_t)1<<31)
 #define OGS_PFCP_MODIFY_URR_VOLUME_THRESH ((uint64_t)1<<32)
 #define OGS_PFCP_MODIFY_URR_TIME_THRESH ((uint64_t)1<<33)
+/* TSC port-management (PMIC) delivery: a network-initiated (PCF-triggered, no SBI
+ * requester) PFCP Session Modification that only carries tsc_management_information
+ * to the NW-TT — no PDR/FAR change, so the modify-response handler matches no branch
+ * and is a no-op (TS 23.502 §4.3.3.2; TS 29.244). */
+#define OGS_PFCP_MODIFY_TSC ((uint64_t)1<<34)
     uint64_t        modify_flags;
 
 #define OGS_PFCP_DELETE_TRIGGER_LOCAL_INITIATED 1

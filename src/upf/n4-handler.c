@@ -22,6 +22,63 @@
 #include "gtp-path.h"
 #include "n4-handler.h"
 
+/* Minimal base64 decoder (the UPF does not link ogs-crypt). Returns decoded length. */
+static int upf_b64_decode(const char *in, uint8_t *out, int outcap)
+{
+    int n = 0, bits = 0, acc = 0, v;
+    for (; in && *in; in++) {
+        char c = *in;
+        if (c >= 'A' && c <= 'Z')      v = c - 'A';
+        else if (c >= 'a' && c <= 'z') v = c - 'a' + 26;
+        else if (c >= '0' && c <= '9') v = c - '0' + 52;
+        else if (c == '+')             v = 62;
+        else if (c == '/')             v = 63;
+        else                           continue; /* '=' padding / whitespace */
+        acc = (acc << 6) | v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            if (n < outcap)
+                out[n++] = (uint8_t)((acc >> bits) & 0xFF);
+        }
+    }
+    return n;
+}
+
+/* Parse the NW-TT PMIC (TS 24.539 MANAGE PORT COMMAND, base64-encoded as carried over
+ * N5/N4) into the 802.1Qbv gate's allowed-PCP set: the OR of every AdminControlList
+ * entry's GateStatesValue bitmap (bit p set => PCP p is gated open). Returns 0 on any
+ * parse failure so the data path fails open (enforces nothing). */
+static uint8_t upf_pmic_parse_gate_pcp_mask(const void *b64)
+{
+    uint8_t raw[512], mask = 0;
+    int n, i, end;
+    uint16_t list_len, name, vlen, j;
+
+    if (!b64)
+        return 0;
+    n = upf_b64_decode((const char *)b64, raw, sizeof(raw));
+    /* MANAGE PORT COMMAND: msg_type(1)=0x01 | port-management-list length(2) | operations. */
+    if (n < 3 || raw[0] != 0x01)
+        return 0;
+    list_len = (raw[1] << 8) | raw[2];
+    i = 3;
+    end = (3 + (int)list_len <= n) ? 3 + (int)list_len : n;
+    /* Set-parameter op: op-code(1) | port-parameter name(2) | value-length(2) | value. */
+    while (i + 5 <= end) {
+        name = (raw[i + 1] << 8) | raw[i + 2];
+        vlen = (raw[i + 3] << 8) | raw[i + 4];
+        if (i + 5 + (int)vlen > end)
+            break;
+        /* AdminControlList (0x0006): entries of [gate-op(1), GateStatesValue(1), time(4)]. */
+        if (name == 0x0006)
+            for (j = 0; j + 6 <= vlen; j += 6)
+                mask |= raw[i + 5 + j + 1];
+        i += 5 + vlen;
+    }
+    return mask;
+}
+
 static void upf_n4_handle_create_urr(upf_sess_t *sess, ogs_pfcp_tlv_create_urr_t *create_urr_arr,
                               uint8_t *cause_value, uint8_t *offending_ie_value)
 {
@@ -300,8 +357,11 @@ void upf_n4_handle_session_modification_request(
             sess->nwtt.pmic = ogs_calloc(1, pmic->len + 1);
             if (sess->nwtt.pmic && pmic->data)
                 memcpy(sess->nwtt.pmic, pmic->data, pmic->len);
-            ogs_info("[UPF] NW-TT PMIC applied: %u octets, NW-TT port[%u] "
-                     "(DS-TT port[%u])", pmic->len,
+            sess->nwtt.gate_pcp_mask =
+                upf_pmic_parse_gate_pcp_mask(sess->nwtt.pmic);
+            ogs_info("[UPF] NW-TT PMIC applied: %u octets, gate PCP mask[0x%02x], "
+                     "NW-TT port[%u] (DS-TT port[%u])", pmic->len,
+                     sess->nwtt.gate_pcp_mask,
                      req->tsc_management_information.nw_tt_port_number.presence ?
                         be32toh(*(uint32_t *)req->tsc_management_information.
                             nw_tt_port_number.data) : 0,

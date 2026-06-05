@@ -20,6 +20,8 @@
 #include "sbi-path.h"
 #include "pfcp-path.h"
 #include "nas-path.h"
+#include "gsm-build.h"
+#include "namf-build.h"
 #include "binding.h"
 
 #include "npcf-handler.h"
@@ -886,6 +888,29 @@ bool smf_npcf_smpolicycontrol_handle_update_notify(
     ogs_assert(true == ogs_sbi_send_http_status_no_content(stream));
 
     smf_qos_flow_binding(sess);
+
+    /* Deliver the NW-TT PMIC to the UPF over N4 (TS 29.244). The policy update carries
+     * the CNC's 802.1Qbv gate (PMIC) post-establishment; smf_qos_flow_binding refreshes
+     * the QoS flows but does not carry the PMIC, so trigger a PFCP Session Modification
+     * whose PDR-to-modify builder appends tsc_management_information. flags=0 keeps it
+     * PMIC-only (modify_flags = OGS_PFCP_MODIFY_SESSION → no PDR/FAR change). */
+    if (sess->tsc_bridge.nwtt_pmic)
+        smf_5gc_pfcp_send_all_pdr_modification_request(
+                sess, NULL, OGS_PFCP_MODIFY_TSC, 0);
+
+    /* Deliver the DS-TT PMIC to the UE over N1 (TS 24.501 §8.3.2 / §9.11.4.27). The
+     * gsm_build_pdu_session_modification_command builder appends the DS-TT PMIC; codes
+     * (0,0) keep it PMIC-only (no QoS rule/flow change), and n2smbuf is left NULL so it
+     * is a pure N1 (NAS) delivery via the AMF (Namf_Communication N1N2MessageTransfer). */
+    if (sess->tsc_bridge.dstt_pmic) {
+        smf_n1_n2_message_transfer_param_t param;
+        sess->pti = OGS_NAS_PROCEDURE_TRANSACTION_IDENTITY_UNASSIGNED;
+        memset(&param, 0, sizeof(param));
+        param.state = SMF_NETWORK_REQUESTED_QOS_FLOW_MODIFICATION;
+        param.n1smbuf = gsm_build_pdu_session_modification_command(sess, 0, 0);
+        ogs_assert(param.n1smbuf);
+        smf_namf_comm_send_n1_n2_message_transfer(sess, &param);
+    }
 
     return true;
 

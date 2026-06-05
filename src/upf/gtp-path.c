@@ -91,12 +91,34 @@ static int check_framed_routes(upf_sess_t *sess, int family, uint32_t *addr)
     return false;
 }
 
+#define ETHERTYPE_8021Q 0x8100  /* IEEE 802.1Q VLAN tag (TSN streams carry VID + PCP) */
+
+/* Return the L3 EtherType, transparently peeling an 802.1Q VLAN tag if present, so a
+ * tagged TSN frame classifies by its inner type (IP / gPTP) instead of 0x8100 -- this
+ * also stops a tagged frame from being mislogged as "[DROP] Invalid eth_type [8100]". */
 static uint16_t _get_eth_type(uint8_t *data, uint len) {
-    if (len > ETHER_HDR_LEN) {
-        struct ether_header *hdr = (struct ether_header*)data;
-        return htobe16(hdr->ether_type);
-    }
-    return 0;
+    if (len <= ETHER_HDR_LEN)
+        return 0;
+    struct ether_header *hdr = (struct ether_header *)data;
+    uint16_t et = htobe16(hdr->ether_type);
+    if (et == ETHERTYPE_8021Q && len >= ETHER_HDR_LEN + 4)
+        return htobe16(*(uint16_t *)(data + ETHER_HDR_LEN + 2));  /* inner type, after the TCI */
+    return et;
+}
+
+/* Extract the 802.1Q VID + PCP from a tagged frame; returns false if untagged.
+ * TCI = PCP[3] | DEI[1] | VID[12] (IEEE 802.1Q). DS-TT/NW-TT per TS 23.501 §5.28.3. */
+static bool _get_vlan(const uint8_t *data, uint len, uint16_t *vid, uint8_t *pcp) {
+    if (len < ETHER_HDR_LEN + 4)
+        return false;
+    if (htobe16(*(const uint16_t *)(data + 12)) != ETHERTYPE_8021Q)
+        return false;
+    uint16_t tci = htobe16(*(const uint16_t *)(data + ETHER_HDR_LEN));
+    if (vid)
+        *vid = tci & 0x0FFF;
+    if (pcp)
+        *pcp = (uint8_t)((tci >> 13) & 0x7);
+    return true;
 }
 
 /* UPF-local Ethernet fast-path classification (observability only).
@@ -181,6 +203,27 @@ static bool upf_eth_dl_forward(upf_sess_t *sess, ogs_pkbuf_t *pkbuf)
 /* Flood a DL broadcast/multicast L2 frame to every active Ethernet PDU session
  * (TS 23.501 §5.8.2.5.3). Each session gets its own copy. Returns true if at
  * least one Ethernet session was found (the caller then frees the original). */
+/* NW-TT 802.1Qbv gate: returns true (=> drop) when a VLAN-tagged frame's PCP is not
+ * in this session's gate allowed-PCP set programmed by the PMIC (TS 23.501 §5.28.3;
+ * IEEE 802.1Q §8.6.8.4). Untagged frames and sessions with no parsed gate pass. The
+ * PMIC gate is per-traffic-class/PCP; the strict per-cycle time window is a later
+ * refinement gated on gate-synchronized talkers. */
+static bool upf_nwtt_gate_blocks(const upf_sess_t *sess, ogs_pkbuf_t *pkbuf,
+        const char *dir)
+{
+    uint16_t vid = 0;
+    uint8_t pcp = 0;
+    if (!sess || !sess->nwtt.gate_pcp_mask)
+        return false;
+    if (!_get_vlan(pkbuf->data, pkbuf->len, &vid, &pcp))
+        return false;
+    if ((sess->nwtt.gate_pcp_mask >> pcp) & 0x1)
+        return false;
+    ogs_info("[UPF] NW-TT gate DROP %s vid[%u] pcp[%u] (allowed mask[0x%02x])",
+             dir, vid, pcp, sess->nwtt.gate_pcp_mask);
+    return true;
+}
+
 static bool upf_eth_dl_flood(ogs_pkbuf_t *pkbuf)
 {
     upf_sess_t *sess = NULL;
@@ -191,6 +234,9 @@ static bool upf_eth_dl_flood(ogs_pkbuf_t *pkbuf)
         if (!sess->correlation.ethernet)
             continue;
         any = true;
+        /* NW-TT DL gate: skip this session if the frame's PCP is gated out. */
+        if (upf_nwtt_gate_blocks(sess, pkbuf, "DL-flood"))
+            continue;
         clone = ogs_pkbuf_copy(pkbuf);
         if (!clone)
             continue;
@@ -233,9 +279,19 @@ static void _gtpv1_tun_recv_common_cb(
             const uint8_t *dst_mac = recvbuf->data;
             bool group_addr = (dst_mac[0] & 0x01); /* broadcast or multicast */
 
+            /* NW-TT DL VID/PCP observability (validate the per-flow 802.1Q tag in). */
+            uint16_t dl_vid = 0; uint8_t dl_pcp = 0;
+            if (_get_vlan(recvbuf->data, recvbuf->len, &dl_vid, &dl_pcp))
+                ogs_info("[UPF] Ethernet DL vid[%u] pcp[%u] ethertype[0x%04x] %s",
+                         dl_vid, dl_pcp, _get_eth_type(recvbuf->data, recvbuf->len),
+                         group_addr ? "(flood)" : "(unicast)");
+
             if (!group_addr) {
                 upf_sess_t *esess = upf_sess_find_by_mac(dst_mac);
                 if (esess && esess->correlation.ethernet) {
+                    /* NW-TT DL gate: drop a unicast frame gated out for this session. */
+                    if (upf_nwtt_gate_blocks(esess, recvbuf, "DL"))
+                        goto cleanup;
                     if (upf_eth_dl_forward(esess, recvbuf))
                         return; /* recvbuf consumed by ogs_pfcp_up_handle_pdr() */
                     goto cleanup;
@@ -653,8 +709,11 @@ static void _gtpv1_u_recv_cb(short when, ogs_socket_t fd, void *data)
             uint16_t inner_eth_type = _get_eth_type(pkbuf->data, pkbuf->len);
             upf_eth_class_t klass = (inner_eth_type == ETHERTYPE_GPTP)
                 ? UPF_ETH_CLASS_GPTP : UPF_ETH_CLASS_HIT;
-            ogs_info("[UPF] Ethernet UL class[%s] ethertype[0x%04x] QFI[%d] "
-                     "SEID[0x%llx]", upf_eth_class_str(klass), inner_eth_type,
+            /* NW-TT UL VID/PCP observability (validate the per-flow 802.1Q tag out). */
+            uint16_t ul_vid = 0; uint8_t ul_pcp = 0;
+            _get_vlan(pkbuf->data, pkbuf->len, &ul_vid, &ul_pcp);
+            ogs_info("[UPF] Ethernet UL class[%s] ethertype[0x%04x] vid[%u] pcp[%u] QFI[%d] "
+                     "SEID[0x%llx]", upf_eth_class_str(klass), inner_eth_type, ul_vid, ul_pcp,
                      pdr->qfi, (unsigned long long)sess->upf_n4_seid);
         }
 
@@ -671,6 +730,12 @@ static void _gtpv1_u_recv_cb(short when, ogs_socket_t fd, void *data)
                  * bind the N5 app-session by ueMac. */
                 upf_sess_report_learned_mac(sess, pkbuf->data + UPF_MAC_ALEN);
             }
+
+            /* NW-TT 802.1Qbv gate enforcement (UL egress to N6). Note: the OAI UE
+             * already discards wrong-PCP UL frames via its UL QoS rules, so this is a
+             * redundant-but-spec-correct second check on the network side. */
+            if (upf_nwtt_gate_blocks(sess, pkbuf, "UL"))
+                goto cleanup;
 
             if (far->dst_if == OGS_PFCP_INTERFACE_CORE && eth_dev) {
                 for (i = 0; i < pdr->num_of_urr; i++)
