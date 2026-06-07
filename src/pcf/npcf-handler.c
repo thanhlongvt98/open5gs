@@ -861,8 +861,18 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
         goto cleanup;
     }
 
-    if (!AscReqData->med_components) {
-        strerror = ogs_msprintf("[%s:%d] No AscReqData->MediaCompoenent",
+    /* medComponents is OPTIONAL in TS 29.514 (§4.2.2.2: provided "if available";
+     * the PCF acts only "if the request contains the medComponents attribute"). A
+     * bridge-management app-session that carries ONLY a Port Management Container
+     * (tsnPortManContDstt/Nwtts) and no media is valid: it authorizes the 802.1Qbv
+     * gate schedule (PMIC) without requesting any QoS flow. Reject only when there is
+     * neither media nor a PMIC (nothing to authorize). This also avoids forcing a
+     * QoS-flow add (PCC rule) onto a TSN session whose flow is subscriber-provisioned. */
+    if (!AscReqData->med_components &&
+            !AscReqData->tsn_port_man_cont_dstt &&
+            (!AscReqData->tsn_port_man_cont_nwtts ||
+             !AscReqData->tsn_port_man_cont_nwtts->first)) {
+        strerror = ogs_msprintf("[%s:%d] No AscReqData media components or PMIC",
                 pcf_ue_sm->supi, sess->psi);
         status = OGS_SBI_HTTP_STATUS_BAD_REQUEST;
         goto cleanup;
@@ -1315,7 +1325,13 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
 
     ogs_free(sendmsg.http.location);
 
-    if (PccRuleList->count || QosDecisionList->count) {
+    /* Also send the update-notify for a PMIC-only decision (no PCC rules / QoS
+     * decisions): a bridge-management app-session forwards the 802.1Qbv gate schedule
+     * (tsnPortManContDstt/Nwtts) to the SMF without requesting any QoS flow. */
+    if (PccRuleList->count || QosDecisionList->count ||
+            SmPolicyDecision.tsn_port_man_cont_dstt ||
+            (SmPolicyDecision.tsn_port_man_cont_nwtts &&
+             SmPolicyDecision.tsn_port_man_cont_nwtts->first)) {
         ogs_assert(true == pcf_sbi_send_smpolicycontrol_update_notify(
                                 sess, &SmPolicyDecision));
     }

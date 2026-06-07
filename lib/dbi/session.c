@@ -131,7 +131,12 @@ int ogs_dbi_session_data(char *supi, ogs_s_nssai_t *s_nssai, char *dnn,
                         if (!strcmp(child4_key, OGS_NAME_STRING) &&
                             BSON_ITER_HOLDS_UTF8(&child4_iter)) {
                             utf8 = bson_iter_utf8(&child4_iter, &length);
-                            if (ogs_strncasecmp(utf8, dnn, length) == 0) {
+                            /* Match the DNN EXACTLY. The original prefix compare
+                             * (ogs_strncasecmp over the stored DNN's length) makes a
+                             * stored DNN match any longer query DNN with the same
+                             * prefix — e.g. "sutd" wrongly matches a query for
+                             * "sutd-eth", returning the wrong per-DNN session QoS. */
+                            if (ogs_strcasecmp(utf8, dnn) == 0) {
                                 found = true;
                                 goto done;
                             }

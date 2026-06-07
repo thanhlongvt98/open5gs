@@ -19,6 +19,13 @@
 
 #include "ngap-build.h"
 
+/* CN Packet Delay Budget (TS 23.501 §5.7.3.4) in 0.01 ms units, signalled on every
+ * NonDynamic5QIDescriptor (TS 38.413 §9.3.1.28, ext IEs 187/188) so the NG-RAN
+ * scheduler can compute the radio deadline 5G-AN PDB = PDB - CN PDB. This is a
+ * topology constant (PSA-UPF <-> NG-RAN); lab config knob, 0 disables a direction. */
+#define SMF_CN_PDB_DL_001MS 200  /* 2.00 ms */
+#define SMF_CN_PDB_UL_001MS 100  /* 1.00 ms */
+
 /*
  * Phase 6 Step 3: build one NGAP TSC Assistance Information (TS 38.413
  * §9.3.1.131) from the SMF-local TSC context, for a single direction. Carries
@@ -148,6 +155,43 @@ static void smf_ngap_build_qos_characteristics(
     qosCharacteristics->present = NGAP_QosCharacteristics_PR_nonDynamic5QI;
     qosCharacteristics->choice.nonDynamic5QI = nonDynamic5QI;
     nonDynamic5QI->fiveQI = qos->index;
+
+    /* CN Packet Delay Budget DL/UL extension (TS 38.413 §9.3.1.28, ext IEs 187/188;
+     * ExtendedPacketDelayBudget in 0.01 ms units) so the gNB can subtract it from the
+     * standardized 5QI PDB to get the 5G-AN PDB (TS 23.501 §5.7.3.4). Mirrors the
+     * TSC Survival-Time extension idiom above. */
+    if (SMF_CN_PDB_DL_001MS > 0 || SMF_CN_PDB_UL_001MS > 0) {
+        NGAP_ProtocolExtensionContainer_11905P193_t *extContainer =
+            CALLOC(1, sizeof(NGAP_ProtocolExtensionContainer_11905P193_t));
+        ogs_assert(extContainer);
+        nonDynamic5QI->iE_Extensions =
+            (struct NGAP_ProtocolExtensionContainer *)extContainer;
+
+        if (SMF_CN_PDB_DL_001MS > 0) {
+            NGAP_NonDynamic5QIDescriptor_ExtIEs_t *dlIe =
+                CALLOC(1, sizeof(NGAP_NonDynamic5QIDescriptor_ExtIEs_t));
+            ogs_assert(dlIe);
+            ASN_SEQUENCE_ADD(&extContainer->list, dlIe);
+            dlIe->id = NGAP_ProtocolIE_ID_id_CNPacketDelayBudgetDL;
+            dlIe->criticality = NGAP_Criticality_ignore;
+            dlIe->extensionValue.present =
+                NGAP_NonDynamic5QIDescriptor_ExtIEs__extensionValue_PR_ExtendedPacketDelayBudget;
+            dlIe->extensionValue.choice.ExtendedPacketDelayBudget = SMF_CN_PDB_DL_001MS;
+        }
+        if (SMF_CN_PDB_UL_001MS > 0) {
+            NGAP_NonDynamic5QIDescriptor_ExtIEs_t *ulIe =
+                CALLOC(1, sizeof(NGAP_NonDynamic5QIDescriptor_ExtIEs_t));
+            ogs_assert(ulIe);
+            ASN_SEQUENCE_ADD(&extContainer->list, ulIe);
+            ulIe->id = NGAP_ProtocolIE_ID_id_CNPacketDelayBudgetUL;
+            ulIe->criticality = NGAP_Criticality_ignore;
+            ulIe->extensionValue.present =
+                NGAP_NonDynamic5QIDescriptor_ExtIEs__extensionValue_PR_ExtendedPacketDelayBudget_1;
+            ulIe->extensionValue.choice.ExtendedPacketDelayBudget_1 = SMF_CN_PDB_UL_001MS;
+        }
+        ogs_info("[SMF] NGAP CN PDB encoded on NonDynamic5QI: 5QI[%d] DL[%d x0.01ms] "
+                 "UL[%d x0.01ms]", qos->index, SMF_CN_PDB_DL_001MS, SMF_CN_PDB_UL_001MS);
+    }
 }
 
 ogs_pkbuf_t *ngap_build_pdu_session_resource_setup_request_transfer(
