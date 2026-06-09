@@ -186,11 +186,12 @@ upf_sess_t *upf_sess_find_by_ipv6(uint32_t *addr6);
 /* NW-TT MAC-learning bridge for Ethernet PDU sessions.
  * upf_sess_learn_mac() records an inner source MAC seen on UL; the matching
  * upf_sess_find_by_mac() resolves a DL frame's destination MAC to its session. */
-void upf_sess_learn_mac(upf_sess_t *sess, const uint8_t *mac);
+/* Returns true if the MAC was newly learned (not seen before for this session). */
+bool upf_sess_learn_mac(upf_sess_t *sess, const uint8_t *mac);
 upf_sess_t *upf_sess_find_by_mac(const uint8_t *mac);
-/* report a learned DS-TT MAC to the SMF via a PFCP Session Report
- * (Ethernet Traffic Information -> MAC Addresses Detected). Reports once per
- * session (nwtt.mac_reported); enables ueMac-based N5 binding. */
+/* Report a newly-learned DS-TT MAC to the SMF via PFCP Session Report
+ * (Ethernet Traffic Information -> MAC Addresses Detected, TS 29.244 §8.2.96).
+ * Called only when upf_sess_learn_mac returns true (once per unique MAC). */
 void upf_sess_report_learned_mac(upf_sess_t *sess, const uint8_t *mac);
 upf_sess_t *upf_sess_find_by_id(ogs_pool_id_t id);
 

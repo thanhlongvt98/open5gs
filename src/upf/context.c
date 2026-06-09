@@ -375,7 +375,7 @@ upf_sess_t *upf_sess_find_by_ipv6(uint32_t *addr6)
     return ret;
 }
 
-void upf_sess_learn_mac(upf_sess_t *sess, const uint8_t *mac)
+bool upf_sess_learn_mac(upf_sess_t *sess, const uint8_t *mac)
 {
     upf_sess_mac_t *entry = NULL;
 
@@ -385,7 +385,7 @@ void upf_sess_learn_mac(upf_sess_t *sess, const uint8_t *mac)
 
     /* Already mapped to this session — nothing to learn. */
     if (ogs_hash_get(self.mac_hash, mac, UPF_MAC_ALEN) == sess)
-        return;
+        return false;
 
     entry = ogs_calloc(1, sizeof(*entry));
     ogs_assert(entry);
@@ -401,6 +401,7 @@ void upf_sess_learn_mac(upf_sess_t *sess, const uint8_t *mac)
             "[%02x:%02x:%02x:%02x:%02x:%02x] -> UPF-N4-SEID[0x%llx]",
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
             (unsigned long long)sess->upf_n4_seid);
+    return true;
 }
 
 void upf_sess_report_learned_mac(upf_sess_t *sess, const uint8_t *mac)
@@ -411,8 +412,11 @@ void upf_sess_report_learned_mac(upf_sess_t *sess, const uint8_t *mac)
     ogs_assert(sess);
     ogs_assert(mac);
 
-    if (sess->nwtt.mac_reported)
-        return;
+    /* Report every new MAC: upf_sess_learn_mac() already deduplicates via the
+     * hash (only new MACs reach here), so each is reported once. This allows
+     * the pinned MAC (set by pin_mac.py after the first random frame) to be
+     * forwarded to the SMF → PCF → AF so the bridge is registered with the
+     * deterministic DS-TT MAC used in the 802.1Qcc stream. */
 
     /* The usage report is per-URR; ride the MAC on the session's first URR. */
     urr = ogs_list_first(&sess->pfcp.urr_list);
@@ -437,7 +441,6 @@ void upf_sess_report_learned_mac(upf_sess_t *sess, const uint8_t *mac)
         ogs_error("[UPF] MAC Addresses Detected report send failed");
         return;
     }
-    sess->nwtt.mac_reported = true;
     ogs_info("[UPF] reported DS-TT MAC [%02x:%02x:%02x:%02x:%02x:%02x] to SMF "
             "(PFCP MAC Addresses Detected)",
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);

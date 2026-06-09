@@ -1367,19 +1367,21 @@ uint8_t smf_n4_handle_session_report_request(
             if (use_rep->ethernet_traffic_information.presence &&
                 use_rep->ethernet_traffic_information.
                         mac_addresses_detected.presence) {
-                if (!sess->tsc_bridge.has_ds_tt_mac) {
-                    uint8_t *m = use_rep->ethernet_traffic_information.
-                            mac_addresses_detected.data;
-                    uint16_t mlen = use_rep->ethernet_traffic_information.
-                            mac_addresses_detected.len;
-                    if (m && mlen >= 1 + 6 && m[0] >= 1) {
-                        memcpy(sess->tsc_bridge.ds_tt_mac, m + 1, 6);
-                        sess->tsc_bridge.has_ds_tt_mac = true;
-                        ds_tt_mac_learned = true;
-                        ogs_info("[SMF] DS-TT MAC "
-                            "[%02x:%02x:%02x:%02x:%02x:%02x] (PSI[%d])",
-                            m[1], m[2], m[3], m[4], m[5], m[6], sess->psi);
-                    }
+                /* Relay every new DS-TT MAC the UPF learns: pin_mac.py changes
+                 * the oaitap MAC after the first (random) frame, so the pinned
+                 * MAC arrives as a second PFCP report. Accept and relay it so
+                 * the AF can register the bridge under the deterministic MAC. */
+                uint8_t *m = use_rep->ethernet_traffic_information.
+                        mac_addresses_detected.data;
+                uint16_t mlen = use_rep->ethernet_traffic_information.
+                        mac_addresses_detected.len;
+                if (m && mlen >= 1 + 6 && m[0] >= 1) {
+                    memcpy(sess->tsc_bridge.ds_tt_mac, m + 1, 6);
+                    sess->tsc_bridge.has_ds_tt_mac = true;
+                    ds_tt_mac_learned = true;
+                    ogs_info("[SMF] DS-TT MAC "
+                        "[%02x:%02x:%02x:%02x:%02x:%02x] (PSI[%d])",
+                        m[1], m[2], m[3], m[4], m[5], m[6], sess->psi);
                 }
                 continue;
             }

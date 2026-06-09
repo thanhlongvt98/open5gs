@@ -725,10 +725,11 @@ static void _gtpv1_u_recv_cb(short when, ogs_socket_t fd, void *data)
             ogs_pfcp_dev_t *eth_dev = upf_eth_bridge_dev();
 
             if (pkbuf->len >= 2 * UPF_MAC_ALEN) {
-                upf_sess_learn_mac(sess, pkbuf->data + UPF_MAC_ALEN);
-                /* report the DS-TT MAC to the SMF (once) so the PCF can
-                 * bind the N5 app-session by ueMac. */
-                upf_sess_report_learned_mac(sess, pkbuf->data + UPF_MAC_ALEN);
+                /* learn_mac returns true only for genuinely new MACs (hash-deduped).
+                 * Report each new MAC to the SMF so the AF gets the pinned MAC after
+                 * pin_mac.py changes oaitap_ueN (TS 23.501 §5.28.1). */
+                if (upf_sess_learn_mac(sess, pkbuf->data + UPF_MAC_ALEN))
+                    upf_sess_report_learned_mac(sess, pkbuf->data + UPF_MAC_ALEN);
             }
 
             /* NW-TT 802.1Qbv gate enforcement (UL egress to N6). Note: the OAI UE
