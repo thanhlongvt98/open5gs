@@ -898,11 +898,26 @@ bool smf_npcf_smpolicycontrol_handle_update_notify(
         smf_5gc_pfcp_send_all_pdr_modification_request(
                 sess, NULL, OGS_PFCP_MODIFY_TSC, 0);
 
-    /* Deliver the DS-TT PMIC to the UE over N1 (TS 24.501 §8.3.2 / §9.11.4.27). The
-     * gsm_build_pdu_session_modification_command builder appends the DS-TT PMIC; codes
-     * (0,0) keep it PMIC-only (no QoS rule/flow change), and n2smbuf is left NULL so it
-     * is a pure N1 (NAS) delivery via the AMF (Namf_Communication N1N2MessageTransfer). */
-    if (sess->tsc_bridge.dstt_pmic) {
+    /* Deliver the DS-TT PMIC to the UE over N1 (TS 24.501 §8.3.2 / §9.11.4.27) — but ONLY
+     * when smf_qos_flow_binding() above did NOT dispatch a QoS-flow modification.
+     *
+     * When the policy update creates/modifies a QoS flow (e.g. the delay-critical GBR flow
+     * for a TSN bridge), smf_qos_flow_binding() leaves that flow on
+     * sess->qos_flow_to_modify_list and fires an asynchronous PFCP Session Modification
+     * whose transaction still references that list. The PFCP response then drives the
+     * network-requested modification in smf_5gc_n4_handle_session_modification_response(),
+     * which sends a SINGLE N1N2 transfer (TS 23.502 §4.3.3.2: one PFCP round-trip, then one
+     * N1N2): its N1 already carries the DS-TT PMIC (gsm_build_pdu_session_modification_command
+     * appends it unconditionally) and its N2 already carries the TSCAI
+     * (ngap_build_pdu_session_resource_modify_request_transfer attaches the TSCTrafficChar-
+     * acteristics for the TSC flow when ACTIVE). Sending a second, competing N1N2 here — or
+     * re-initialising sess->qos_flow_to_modify_list while the PFCP xact still depends on it —
+     * corrupts that transaction and aborts the SMF (ogs_nas_build_qos_rules: num_of_rule).
+     *
+     * So only the PMIC-only case (no QoS-flow change, list empty) needs a standalone N1: a
+     * pure N1 PDU Session Modification Command (codes (0,0)) that appends the DS-TT PMIC. */
+    if (ogs_list_count(&sess->qos_flow_to_modify_list) == 0 &&
+            sess->tsc_bridge.dstt_pmic) {
         smf_n1_n2_message_transfer_param_t param;
         sess->pti = OGS_NAS_PROCEDURE_TRANSACTION_IDENTITY_UNASSIGNED;
         memset(&param, 0, sizeof(param));
