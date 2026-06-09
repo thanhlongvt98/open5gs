@@ -48,20 +48,24 @@ end:
 }
 
 /*
- * option-3: PCF -> TSN AF bridge relay (replaces the manual driver MAC
- * injection). When the PCF learns the DS-TT MAC from the SMF's tsnBridgeInfo
- * (TS 29.512), it POSTs the 5GS bridge to the AF northbound /v1/bridges so the AF
- * can bind the N5 app-session by ueMac (TS 29.514). The body is the AF's own
- * (non-OpenAPI) bridge JSON, so attach it as a raw content string after building
- * the request shell. Keyed by supi (an Ethernet PDU session has no UE IP).
+ * option-3: PCF -> TSN AF bridge relay (TS 23.501 §5.28.1). When the PCF
+ * learns the DS-TT MAC from the SMF's tsnBridgeInfo (TS 29.512), it POSTs the
+ * 5GS bridge descriptor to the AF /v1/bridges. Body carries only spec-defined
+ * fields: bridge_id, ds_tt_port, ds_tt_mac, nw_tt_port, nw_tt_mac,
+ * ds_tt_resid_time_ns. NW-TT port/MAC come from env vars TSN_NW_TT_PORT /
+ * TSN_NW_TT_MAC. No supi (not a spec field for the bridge descriptor).
  */
 ogs_sbi_request_t *pcf_naf_build_tsn_bridge_register(
-        const char *af_uri, const char *supi,
+        const char *af_uri,
         int bridge_id, int ds_tt_port, const char *ds_tt_mac)
 {
     ogs_sbi_message_t message;
     ogs_sbi_request_t *request = NULL;
     char *body = NULL;
+    const char *nw_tt_mac_env = getenv("TSN_NW_TT_MAC");
+    const char *nw_tt_port_env = getenv("TSN_NW_TT_PORT");
+    int nw_tt_port = nw_tt_port_env ? atoi(nw_tt_port_env) : 2;
+    const char *nw_tt_mac = nw_tt_mac_env ? nw_tt_mac_env : "";
 
     ogs_assert(af_uri);
 
@@ -78,9 +82,12 @@ ogs_sbi_request_t *pcf_naf_build_tsn_bridge_register(
 
     body = ogs_msprintf(
             "{\"bridge_id\":%d,\"ds_tt_port\":%d,"
-            "\"ds_tt_mac\":\"%s\",\"supi\":\"%s\"}",
+            "\"ds_tt_mac\":\"%s\","
+            "\"nw_tt_port\":%d,\"nw_tt_mac\":\"%s\","
+            "\"ds_tt_resid_time_ns\":1000}",
             bridge_id, ds_tt_port,
-            ds_tt_mac ? ds_tt_mac : "", supi ? supi : "");
+            ds_tt_mac ? ds_tt_mac : "",
+            nw_tt_port, nw_tt_mac);
     ogs_assert(body);
 
     request->http.content = body;          /* freed by ogs_sbi_request_free() */

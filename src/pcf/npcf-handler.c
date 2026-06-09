@@ -655,7 +655,6 @@ bool pcf_npcf_smpolicycontrol_handle_update(pcf_sess_t *sess,
         if (bi->dstt_addr &&
             pcf_sess_set_mac_addr(sess, bi->dstt_addr) == true) {
             int r;
-            pcf_ue_sm_t *pcf_ue_sm = pcf_ue_sm_find_by_id(sess->pcf_ue_sm_id);
 
             /* Register the BSF MAC-binding FIRST (local, fast) so it is in place
              * before the AF's ueMac app-session create (triggered by the relay
@@ -666,12 +665,10 @@ bool pcf_npcf_smpolicycontrol_handle_update(pcf_sess_t *sess,
                     pcf_nbsf_management_build_register, sess, stream, NULL);
             ogs_expect(r == OGS_OK);
 
-            /* option-3: relay the learned bridge + DS-TT MAC to the TSN
-             * AF (replaces the manual driver injection). The AF binds the N5
-             * app-session by this ueMac (TS 29.514) and auto-publishes the
-             * declared stream. Keyed by supi (Ethernet sessions have no UE IP). */
+            /* option-3: relay the learned bridge descriptor to the TSN AF
+             * (TS 23.501 §5.28.1). Spec fields only: bridge_id, ds_tt_port,
+             * ds_tt_mac; NW-TT info comes from env vars in pcf_naf_build.c. */
             pcf_sbi_send_tsn_bridge_relay(
-                    pcf_ue_sm ? pcf_ue_sm->supi : NULL,
                     bi->is_bridge_id ? bi->bridge_id : 0,
                     bi->is_dstt_port_num ? bi->dstt_port_num : 0,
                     bi->dstt_addr);

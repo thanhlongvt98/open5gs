@@ -29,9 +29,12 @@ extern "C" {
 ogs_sbi_request_t *pcf_naf_callback_build_policyauthorization_terminate(
         pcf_app_t *app_session, void *data);
 
-/* option-3: build the PCF -> TSN AF bridge relay POST (/v1/bridges). */
+/* option-3: build the PCF -> TSN AF bridge relay POST (/v1/bridges).
+ * Carries spec-defined fields only (TS 23.501 §5.28.1): bridge_id, ds_tt_port,
+ * ds_tt_mac, nw_tt_port, nw_tt_mac, ds_tt_resid_time_ns. NW-TT info comes
+ * from env vars TSN_NW_TT_PORT / TSN_NW_TT_MAC. No supi. */
 ogs_sbi_request_t *pcf_naf_build_tsn_bridge_register(
-        const char *af_uri, const char *supi,
+        const char *af_uri,
         int bridge_id, int ds_tt_port, const char *ds_tt_mac);
 
 #ifdef __cplusplus

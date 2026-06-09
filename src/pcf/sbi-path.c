@@ -711,7 +711,7 @@ bool pcf_sbi_send_policyauthorization_terminate_notify(pcf_app_t *app)
  * the AF binds the N5 app-session by this ueMac and auto-publishes the stream.
  */
 bool pcf_sbi_send_tsn_bridge_relay(
-        const char *supi, int bridge_id, int ds_tt_port, const char *ds_tt_mac)
+        int bridge_id, int ds_tt_port, const char *ds_tt_mac)
 {
     bool rc;
     ogs_sbi_request_t *request = NULL;
@@ -749,7 +749,7 @@ bool pcf_sbi_send_tsn_bridge_relay(
     ogs_freeaddrinfo(addr6);
 
     request = pcf_naf_build_tsn_bridge_register(
-            af_uri, supi, bridge_id, ds_tt_port, ds_tt_mac);
+            af_uri, bridge_id, ds_tt_port, ds_tt_mac);
     if (!request) {
         ogs_error("[PCF] TSN AF relay: build request failed");
         return false;
@@ -761,8 +761,8 @@ bool pcf_sbi_send_tsn_bridge_relay(
 
     ogs_sbi_request_free(request);
 
-    ogs_info("[PCF] relayed TSN bridge to AF [%s] supi[%s] dsttMac[%s]",
-            af_uri, supi ? supi : "", ds_tt_mac ? ds_tt_mac : "");
+    ogs_info("[PCF] relayed TSN bridge to AF [%s] dsttMac[%s]",
+            af_uri, ds_tt_mac ? ds_tt_mac : "");
 
     return rc;
 }
