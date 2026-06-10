@@ -312,11 +312,16 @@ static void encode_qos_rule_packet_filter(
             ogs_assert(i < OGS_MAX_NUM_OF_FLOW_IN_NAS);
             qos_rule->pf[i].direction = pf->direction;
             qos_rule->pf[i].identifier = pf->identifier;
-
-            ogs_pf_content_from_ipfw_rule(
-                    pf->direction, &qos_rule->pf[i].content, &pf->ipfw_rule,
-                    ogs_global_conf()->parameter.
-                    no_ipv4v6_local_addr_in_packet_filter);
+            if (pf->is_eth) {
+                /* TSN Ethernet packet filter (TS 24.501 §9.11.4.13):
+                 * use the prebuilt L2 content instead of an IP ipfw rule. */
+                qos_rule->pf[i].content = pf->eth_content;
+            } else {
+                ogs_pf_content_from_ipfw_rule(
+                        pf->direction, &qos_rule->pf[i].content, &pf->ipfw_rule,
+                        ogs_global_conf()->parameter.
+                        no_ipv4v6_local_addr_in_packet_filter);
+            }
             i++;
         }
         qos_rule->num_of_packet_filter = i;

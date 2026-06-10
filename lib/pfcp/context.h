@@ -405,6 +405,14 @@ ED6(uint8_t     spare1:3;,
     ogs_ipfw_rule_t ipfw;
     uint32_t sdf_filter_id;
 
+    /* TSN Ethernet packet filter (TS 24.501 §9.11.4.13): when the SDF
+     * Flow-Description is the "eth|..." sentinel, the rule carries an L2
+     * filter (dst/src MAC, C-TAG VID/PCP, EtherType) instead of an IPFW IP
+     * rule. The UPF matches DL frames against this to steer the TSN stream
+     * onto its dedicated QoS flow (DRB/QFI). */
+    bool is_eth;
+    ogs_pf_content_t eth_content;
+
     /* Related Context */
     ogs_pfcp_pdr_t  *pdr;
 } ogs_pfcp_rule_t;

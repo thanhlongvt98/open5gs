@@ -162,8 +162,9 @@ typedef struct upf_sess_s {
         uint8_t  gate_pcp_mask;      /* 802.1Qbv gate allowed-PCP set parsed from the
                                         PMIC; bit p set => PCP p is gated open. 0 => no
                                         gate parsed (fail-open, enforce nothing). */
-        bool     mac_reported;       /* 202606: a learned DS-TT MAC was reported
-                                        to the SMF (PFCP MAC Addresses Detected) */
+        bool     mac_reported;       /* 202606: a learned end-station device MAC
+                                        was reported to the SMF (PFCP MAC Addresses
+                                        Detected). NOT the DS-TT port identity. */
     } nwtt;
 } upf_sess_t;
 
@@ -189,9 +190,11 @@ upf_sess_t *upf_sess_find_by_ipv6(uint32_t *addr6);
 /* Returns true if the MAC was newly learned (not seen before for this session). */
 bool upf_sess_learn_mac(upf_sess_t *sess, const uint8_t *mac);
 upf_sess_t *upf_sess_find_by_mac(const uint8_t *mac);
-/* Report a newly-learned DS-TT MAC to the SMF via PFCP Session Report
- * (Ethernet Traffic Information -> MAC Addresses Detected, TS 29.244 §8.2.96).
- * Called only when upf_sess_learn_mac returns true (once per unique MAC). */
+/* Report a newly-learned END-STATION device MAC to the SMF via PFCP Session
+ * Report (Ethernet Traffic Information -> MAC Addresses Detected, TS 29.244
+ * §8.2.96). This is NOT the DS-TT port identity (that comes over N1). Called
+ * once per unique MAC; the SMF no longer consumes it for bridge registration
+ * (end-station FDB is discovered via LLDP, TS 23.501 §5.28.1). */
 void upf_sess_report_learned_mac(upf_sess_t *sess, const uint8_t *mac);
 upf_sess_t *upf_sess_find_by_id(ogs_pool_id_t id);
 

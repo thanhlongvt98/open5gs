@@ -665,13 +665,15 @@ bool pcf_npcf_smpolicycontrol_handle_update(pcf_sess_t *sess,
                     pcf_nbsf_management_build_register, sess, stream, NULL);
             ogs_expect(r == OGS_OK);
 
-            /* option-3: relay the learned bridge descriptor to the TSN AF
-             * (TS 23.501 §5.28.1). Spec fields only: bridge_id, ds_tt_port,
-             * ds_tt_mac; NW-TT info comes from env vars in pcf_naf_build.c. */
-            pcf_sbi_send_tsn_bridge_relay(
+            /* Notify the TSN AF of the new 5GS bridge over standard N5
+             * (TS 29.514 §4.2.5.16): POST PduSessionTsnBridge to
+             * {notifUri}/new-bridge. dsttAddr = the DS-TT *port* MAC from N1;
+             * dsttResidTime = UE-DS-TT residence time (ns). */
+            pcf_sbi_send_tsn_bridge_new_bridge(
                     bi->is_bridge_id ? bi->bridge_id : 0,
                     bi->is_dstt_port_num ? bi->dstt_port_num : 0,
-                    bi->dstt_addr);
+                    bi->dstt_addr,
+                    bi->is_dstt_resid_time, bi->dstt_resid_time);
 
             if (r == OGS_OK)
                 return true; /* 204 sent by the BSF register response handler */
@@ -701,8 +703,10 @@ static const struct {
     { 86, 18, 5,   1354 },
 };
 
-/* Fallback 5QI when the AF's tsnQos carries no usable requirement. */
-#define PCF_TSC_5QI_DEFAULT 84
+/* Fallback 5QI when the AF's tsnQos carries no usable requirement.
+ * 85 (delay-critical GBR, PDB 5ms) = the subscriber-provisioned Ethernet-session 5QI,
+ * so the AF-requested TSC flow folds onto the same QoS flow (no 84/85 split). */
+#define PCF_TSC_5QI_DEFAULT 85
 
 /* Map the AF's TsnQosContainer (TS 29.514 §5.6.2.35) to a standardized
  * delay-critical-GBR 5QI (PCF QoS mapping, TS 23.501 §5.28.4 / §5.27.3 point 5).
@@ -1026,25 +1030,84 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
                                 }
                             }
 
-                            /* TSN Ethernet PDU session: the AF carries the
-                             * stream identity as an EthFlowDescription
-                             * (destMacAddr + VLAN, TS 29.514). open5gs's
-                             * policy model (ogs_flow_t) is IP-only, so we map
-                             * the Ethernet flow to a match-all IP SDF here so
-                             * the SMF can bind a QoS flow (and the TSCAI). The
-                             * real per-stream L2 filtering is enforced at the
-                             * DS-TT/NW-TT PSFP via the PMIC, not this SDF. */
+                            /* TSN Ethernet PDU session: carry the real L2
+                             * stream filter (TS 29.514 EthFlowDescription)
+                             * as an "eth|..." sentinel in flow->description so
+                             * the SMF builds a proper Ethernet ogs_pf_content_t
+                             * (TS 24.501 §9.11.4.13) for the UE QoS rule.
+                             * A second flow for gPTP (EtherType 0x88F7) is
+                             * always added so gPTP sync packets are classified
+                             * onto this QoS flow. */
                             if (sub->num_of_flow == 0 &&
                                     SubComponent->ethf_descs &&
                                     SubComponent->ethf_descs->count > 0) {
-                                ogs_flow_t *flow =
-                                    &sub->flow[sub->num_of_flow];
-                                flow->description =
-                                    ogs_strdup("permit out ip from any to any");
-                                ogs_assert(flow->description);
-                                sub->num_of_flow++;
-                                ogs_info("[PCF] EthFlowDescription -> "
-                                        "match-all SDF (TSN bridge flow)");
+                                OpenAPI_lnode_t *eth_node = NULL;
+                                OpenAPI_eth_flow_description_t *eth_desc = NULL;
+                                ogs_flow_t *flow = NULL;
+                                ogs_flow_t *flow2 = NULL;
+                                const char *dst_mac = "-";
+                                const char *src_mac = "-";
+                                char vid_str[8] = "-";
+                                char pcp_str[4] = "-";
+                                const char *eth_type = "-";
+
+                                eth_node = SubComponent->ethf_descs->first;
+                                if (eth_node)
+                                    eth_desc = eth_node->data;
+
+                                if (eth_desc) {
+                                    if (eth_desc->dest_mac_addr)
+                                        dst_mac = eth_desc->dest_mac_addr;
+                                    if (eth_desc->source_mac_addr)
+                                        src_mac = eth_desc->source_mac_addr;
+                                    if (eth_desc->eth_type)
+                                        eth_type = eth_desc->eth_type;
+                                    /* Decode first VLAN tag: 4-hex TCI string
+                                     * e.g. "A064" → PCP=5, VID=100 */
+                                    if (eth_desc->vlan_tags &&
+                                            eth_desc->vlan_tags->count > 0 &&
+                                            eth_desc->vlan_tags->first) {
+                                        const char *tag =
+                                            (const char *)
+                                            eth_desc->vlan_tags->first->data;
+                                        if (tag) {
+                                            long tci = strtol(tag, NULL, 16);
+                                            int vid = (int)(tci & 0x0FFF);
+                                            int pcp = (int)((tci >> 13) & 0x7);
+                                            ogs_snprintf(vid_str,
+                                                sizeof(vid_str), "%d", vid);
+                                            ogs_snprintf(pcp_str,
+                                                sizeof(pcp_str), "%d", pcp);
+                                        }
+                                    }
+                                }
+
+                                /* Primary flow: TSN stream L2 filter */
+                                if (sub->num_of_flow <
+                                        (int)OGS_ARRAY_SIZE(sub->flow)) {
+                                    flow = &sub->flow[sub->num_of_flow];
+                                    flow->description = ogs_msprintf(
+                                        "eth|%s|%s|%s|%s|%s",
+                                        dst_mac, src_mac,
+                                        vid_str, pcp_str, eth_type);
+                                    ogs_assert(flow->description);
+                                    flow->direction = OGS_FLOW_BIDIRECTIONAL;
+                                    sub->num_of_flow++;
+                                    ogs_info("[PCF] EthFlowDescription -> "
+                                        "L2 sentinel (TSN stream): %s",
+                                        flow->description);
+                                }
+
+                                /* Secondary flow: gPTP (EtherType 0x88F7) */
+                                if (sub->num_of_flow <
+                                        (int)OGS_ARRAY_SIZE(sub->flow)) {
+                                    flow2 = &sub->flow[sub->num_of_flow];
+                                    flow2->description =
+                                        ogs_strdup("eth|-|-|-|-|88f7");
+                                    ogs_assert(flow2->description);
+                                    flow2->direction = OGS_FLOW_BIDIRECTIONAL;
+                                    sub->num_of_flow++;
+                                }
                             }
                             media_component->num_of_sub++;
                         }
@@ -1634,25 +1697,82 @@ bool pcf_npcf_policyauthorization_handle_update(
                                 }
                             }
 
-                            /* TSN Ethernet PDU session: the AF carries the
-                             * stream identity as an EthFlowDescription
-                             * (destMacAddr + VLAN, TS 29.514). open5gs's
-                             * policy model (ogs_flow_t) is IP-only, so we map
-                             * the Ethernet flow to a match-all IP SDF here so
-                             * the SMF can bind a QoS flow (and the TSCAI). The
-                             * real per-stream L2 filtering is enforced at the
-                             * DS-TT/NW-TT PSFP via the PMIC, not this SDF. */
+                            /* TSN Ethernet PDU session: carry the real L2
+                             * stream filter (TS 29.514 EthFlowDescription)
+                             * as an "eth|..." sentinel in flow->description so
+                             * the SMF builds a proper Ethernet ogs_pf_content_t
+                             * (TS 24.501 §9.11.4.13) for the UE QoS rule.
+                             * A second flow for gPTP (EtherType 0x88F7) is
+                             * always added so gPTP sync packets are classified
+                             * onto this QoS flow. */
                             if (sub->num_of_flow == 0 &&
                                     SubComponent->ethf_descs &&
                                     SubComponent->ethf_descs->count > 0) {
-                                ogs_flow_t *flow =
-                                    &sub->flow[sub->num_of_flow];
-                                flow->description =
-                                    ogs_strdup("permit out ip from any to any");
-                                ogs_assert(flow->description);
-                                sub->num_of_flow++;
-                                ogs_info("[PCF] EthFlowDescription -> "
-                                        "match-all SDF (TSN bridge flow)");
+                                OpenAPI_lnode_t *eth_node = NULL;
+                                OpenAPI_eth_flow_description_t *eth_desc = NULL;
+                                ogs_flow_t *flow = NULL;
+                                ogs_flow_t *flow2 = NULL;
+                                const char *dst_mac = "-";
+                                const char *src_mac = "-";
+                                char vid_str[8] = "-";
+                                char pcp_str[4] = "-";
+                                const char *eth_type = "-";
+
+                                eth_node = SubComponent->ethf_descs->first;
+                                if (eth_node)
+                                    eth_desc = eth_node->data;
+
+                                if (eth_desc) {
+                                    if (eth_desc->dest_mac_addr)
+                                        dst_mac = eth_desc->dest_mac_addr;
+                                    if (eth_desc->source_mac_addr)
+                                        src_mac = eth_desc->source_mac_addr;
+                                    if (eth_desc->eth_type)
+                                        eth_type = eth_desc->eth_type;
+                                    if (eth_desc->vlan_tags &&
+                                            eth_desc->vlan_tags->count > 0 &&
+                                            eth_desc->vlan_tags->first) {
+                                        const char *tag =
+                                            (const char *)
+                                            eth_desc->vlan_tags->first->data;
+                                        if (tag) {
+                                            long tci = strtol(tag, NULL, 16);
+                                            int vid = (int)(tci & 0x0FFF);
+                                            int pcp = (int)((tci >> 13) & 0x7);
+                                            ogs_snprintf(vid_str,
+                                                sizeof(vid_str), "%d", vid);
+                                            ogs_snprintf(pcp_str,
+                                                sizeof(pcp_str), "%d", pcp);
+                                        }
+                                    }
+                                }
+
+                                /* Primary flow: TSN stream L2 filter */
+                                if (sub->num_of_flow <
+                                        (int)OGS_ARRAY_SIZE(sub->flow)) {
+                                    flow = &sub->flow[sub->num_of_flow];
+                                    flow->description = ogs_msprintf(
+                                        "eth|%s|%s|%s|%s|%s",
+                                        dst_mac, src_mac,
+                                        vid_str, pcp_str, eth_type);
+                                    ogs_assert(flow->description);
+                                    flow->direction = OGS_FLOW_BIDIRECTIONAL;
+                                    sub->num_of_flow++;
+                                    ogs_info("[PCF] EthFlowDescription -> "
+                                        "L2 sentinel (TSN stream): %s",
+                                        flow->description);
+                                }
+
+                                /* Secondary flow: gPTP (EtherType 0x88F7) */
+                                if (sub->num_of_flow <
+                                        (int)OGS_ARRAY_SIZE(sub->flow)) {
+                                    flow2 = &sub->flow[sub->num_of_flow];
+                                    flow2->description =
+                                        ogs_strdup("eth|-|-|-|-|88f7");
+                                    ogs_assert(flow2->description);
+                                    flow2->direction = OGS_FLOW_BIDIRECTIONAL;
+                                    sub->num_of_flow++;
+                                }
                             }
                             media_component->num_of_sub++;
                         }

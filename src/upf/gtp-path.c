@@ -158,14 +158,102 @@ static ogs_pfcp_dev_t *upf_eth_bridge_dev(void)
     return NULL;
 }
 
+/* Match a DL L2 frame against a parsed Ethernet packet filter (TS 24.501
+ * §9.11.4.13). All present components must match (logical AND). A VID or PCP
+ * component on an untagged frame fails the match. Empty filter never matches.
+ *
+ * swap_mac: the AF/PCF emits the filter in UL-canonical form (dst-MAC = the
+ * remote/NW endpoint) so the UE's UL classifier matches UL frames as-is. On the
+ * DL (CORE) interface the remote endpoint is the frame's SOURCE, so the UPF
+ * swaps the dst/src MAC comparison (TS 29.244 §5.2.1A.2A). VID/PCP/EtherType are
+ * direction-independent and compared as-is. */
+static bool upf_eth_frame_matches(
+        const ogs_pf_content_t *c, uint8_t *data, uint len, bool swap_mac)
+{
+    int i;
+    uint16_t vid = 0, et;
+    uint8_t pcp = 0;
+    bool tagged;
+    const uint8_t *dst = data;          /* frame dst MAC */
+    const uint8_t *src = data + 6;      /* frame src MAC */
+
+    if (len < ETHER_HDR_LEN)
+        return false;
+
+    tagged = _get_vlan(data, len, &vid, &pcp);
+
+    for (i = 0; i < c->num_of_component; i++) {
+        switch (c->component[i].type) {
+        case OGS_PACKET_FILTER_DESTINATION_MAC_ADDRESS_TYPE:
+            if (memcmp(swap_mac ? src : dst, c->component[i].mac, 6) != 0)
+                return false;
+            break;
+        case OGS_PACKET_FILTER_SOURCE_MAC_ADDRESS_TYPE:
+            if (memcmp(swap_mac ? dst : src, c->component[i].mac, 6) != 0)
+                return false;
+            break;
+        case OGS_PACKET_FILTER_8021Q_C_TAG_VID_TYPE:
+            if (!tagged || (c->component[i].vid & 0x0FFF) != (vid & 0x0FFF))
+                return false;
+            break;
+        case OGS_PACKET_FILTER_8021Q_C_TAG_PCP_DEI_TYPE:
+            /* component stores (pcp << 1) | DEI; compare the 3-bit PCP */
+            if (!tagged || ((c->component[i].pcp_dei >> 1) & 0x7) != pcp)
+                return false;
+            break;
+        case OGS_PACKET_FILTER_ETHERTYPE_TYPE:
+            et = _get_eth_type(data, len);
+            if (c->component[i].ethertype != et)
+                return false;
+            break;
+        default:
+            break;
+        }
+    }
+    return c->num_of_component > 0;
+}
+
+/* True if the PDR carries any Ethernet packet-filter rule (is_eth). */
+static bool upf_pdr_has_eth_rule(ogs_pfcp_pdr_t *pdr)
+{
+    ogs_pfcp_rule_t *rule = NULL;
+    ogs_list_for_each(&pdr->rule_list, rule)
+        if (rule->is_eth)
+            return true;
+    return false;
+}
+
+/* True if any of the PDR's Ethernet packet-filter rules matches the frame.
+ * swap: DL (CORE) passes true (filter is UL-canonical, dst-MAC = remote = the
+ * DL frame's source); UL (ACCESS) passes false (dst-MAC = the UL frame's dst).
+ * See upf_eth_frame_matches (TS 29.244 §5.2.1A.2A). */
+static bool upf_eth_pdr_matches(
+        ogs_pfcp_pdr_t *pdr, uint8_t *data, uint len, bool swap)
+{
+    ogs_pfcp_rule_t *rule = NULL;
+    ogs_list_for_each(&pdr->rule_list, rule) {
+        if (!rule->is_eth)
+            continue;
+        if (upf_eth_frame_matches(&rule->eth_content, data, len, swap))
+            return true;
+    }
+    return false;
+}
+
 /* Select the downlink PDR of an Ethernet PDU session and hand the raw L2 frame
  * to ogs_pfcp_up_handle_pdr(), which applies the FAR Outer Header Creation
- * (GTP-U encap toward the gNB). Consumes pkbuf on success. Ethernet PDRs are
- * match-all (no IP rule list), so no per-packet filter lookup is done.
+ * (GTP-U encap toward the gNB). Consumes pkbuf on success.
+ *
+ * PDR selection (TS 23.501 §5.7.1.1, TS 24.501 §9.11.4.13): a PDR carrying an
+ * Ethernet packet filter (is_eth) matches only frames with the TSN stream's L2
+ * identity (dst MAC / C-TAG VID / PCP / EtherType) and steers them onto the
+ * dedicated QoS flow (QFI 2 / 5QI 85). A DL PDR with no eth filter is the
+ * match-all default flow (QFI 1) and receives everything else. The pdr_list is
+ * precedence-sorted, so the first eth filter that matches wins.
  * Returns true if the frame was forwarded (pkbuf consumed). */
 static bool upf_eth_dl_forward(upf_sess_t *sess, ogs_pkbuf_t *pkbuf)
 {
-    ogs_pfcp_pdr_t *pdr = NULL, *fallback_pdr = NULL;
+    ogs_pfcp_pdr_t *pdr = NULL, *selected_pdr = NULL, *fallback_pdr = NULL;
     ogs_pfcp_far_t *far = NULL;
     ogs_pfcp_user_plane_report_t report;
     int i;
@@ -174,21 +262,35 @@ static bool upf_eth_dl_forward(upf_sess_t *sess, ogs_pkbuf_t *pkbuf)
     ogs_assert(pkbuf);
 
     ogs_list_for_each(&sess->pfcp.pdr_list, pdr) {
+        bool has_eth_filter = false, eth_matched = false;
+
         far = pdr->far;
         if (!far)
             continue;
         if (pdr->src_if != OGS_PFCP_INTERFACE_CORE)
             continue;
-        fallback_pdr = pdr;
         if (far->dst_if != OGS_PFCP_INTERFACE_ACCESS)
             continue;
         if (far->outer_header_creation.gtpu4 == 0 &&
             far->outer_header_creation.gtpu6 == 0)
             continue;
-        break;
+
+        /* Candidate DL PDR: inspect its Ethernet packet-filter rules.
+         * DL (CORE): swap MAC (filter is UL-canonical). */
+        has_eth_filter = upf_pdr_has_eth_rule(pdr);
+        if (has_eth_filter)
+            eth_matched = upf_eth_pdr_matches(
+                    pdr, pkbuf->data, pkbuf->len, true /* DL: swap MAC */);
+
+        if (has_eth_filter) {
+            if (eth_matched && !selected_pdr)
+                selected_pdr = pdr;     /* precise TSN-stream match */
+        } else if (!fallback_pdr) {
+            fallback_pdr = pdr;         /* match-all default flow */
+        }
     }
-    if (!pdr)
-        pdr = fallback_pdr;
+
+    pdr = selected_pdr ? selected_pdr : fallback_pdr;
     if (!pdr)
         return false;
 
@@ -651,9 +753,23 @@ static void _gtpv1_u_recv_cb(short when, ogs_socket_t fd, void *data)
                     continue;
 
                 /* Check if Rule List in PDR */
-                if (ogs_list_first(&pdr->rule_list) &&
-                    ogs_pfcp_pdr_rule_find_by_packet(pdr, pkbuf) == NULL)
-                    continue;
+                if (ogs_list_first(&pdr->rule_list)) {
+                    if (upf_pdr_has_eth_rule(pdr)) {
+                        /* Ethernet PDU-session UL PDR: the SDF rule is an L2 eth
+                         * filter (is_eth), not an IP rule. ogs_pfcp_pdr_rule_
+                         * find_by_packet() is IP-only and treats an Ethernet
+                         * frame as "non-IP" → returns NULL → the frame would be
+                         * dropped with a GTP-U Error Indication. Match the eth
+                         * filter instead. UL (ACCESS): the filter is UL-canonical
+                         * (dst-MAC = remote = the UL frame's dst) → no MAC swap. */
+                        if (!upf_eth_pdr_matches(
+                                pdr, pkbuf->data, pkbuf->len, false))
+                            continue;
+                    } else if (ogs_pfcp_pdr_rule_find_by_packet(
+                                pdr, pkbuf) == NULL) {
+                        continue;
+                    }
+                }
 
                 break;
             }

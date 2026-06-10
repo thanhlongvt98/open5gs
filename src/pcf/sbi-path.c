@@ -705,13 +705,15 @@ bool pcf_sbi_send_policyauthorization_terminate_notify(pcf_app_t *app)
 }
 
 /*
- * option-3: relay the learned 5GS bridge + DS-TT MAC to the TSN AF
- * northbound (/v1/bridges). The AF URL comes from TSN_AF_BRIDGE_URI (the AF runs
- * in the 5GC netns, default http://127.0.0.1:8080/v1/bridges). Fire-and-forget;
- * the AF binds the N5 app-session by this ueMac and auto-publishes the stream.
+ * PCF -> TSN AF new-bridge notification (TS 29.514 §4.2.5.16): POST a
+ * PduSessionTsnBridge to {notifUri}/new-bridge. The AF URL comes from
+ * TSN_AF_BRIDGE_URI (the AF runs in the 5GC netns, default
+ * http://127.0.0.1:8080/new-bridge). No prior AppSessionContext is required
+ * (§4.2.5.16); the notification asks the AF to create one. Fire-and-forget.
  */
-bool pcf_sbi_send_tsn_bridge_relay(
-        int bridge_id, int ds_tt_port, const char *ds_tt_mac)
+bool pcf_sbi_send_tsn_bridge_new_bridge(
+        int bridge_id, int ds_tt_port, const char *ds_tt_mac,
+        bool has_resid_time, int resid_time_ns)
 {
     bool rc;
     ogs_sbi_request_t *request = NULL;
@@ -724,12 +726,12 @@ bool pcf_sbi_send_tsn_bridge_relay(
 
     af_uri = getenv("TSN_AF_BRIDGE_URI");
     if (!af_uri)
-        af_uri = "http://127.0.0.1:8080/v1/bridges";
+        af_uri = "http://127.0.0.1:8080/new-bridge";
 
     rc = ogs_sbi_getaddr_from_uri(
             &scheme, &fqdn, &fqdn_port, &addr, &addr6, (char *)af_uri);
     if (rc == false || scheme == OpenAPI_uri_scheme_NULL) {
-        ogs_error("[PCF] TSN AF relay: bad TSN_AF_BRIDGE_URI [%s]", af_uri);
+        ogs_error("[PCF] TSN AF new-bridge: bad TSN_AF_BRIDGE_URI [%s]", af_uri);
         return false;
     }
 
@@ -748,10 +750,11 @@ bool pcf_sbi_send_tsn_bridge_relay(
     ogs_freeaddrinfo(addr);
     ogs_freeaddrinfo(addr6);
 
-    request = pcf_naf_build_tsn_bridge_register(
-            af_uri, bridge_id, ds_tt_port, ds_tt_mac);
+    request = pcf_naf_build_tsn_bridge_new_bridge(
+            af_uri, bridge_id, ds_tt_port, ds_tt_mac,
+            has_resid_time, resid_time_ns);
     if (!request) {
-        ogs_error("[PCF] TSN AF relay: build request failed");
+        ogs_error("[PCF] TSN AF new-bridge: build request failed");
         return false;
     }
 
@@ -761,7 +764,7 @@ bool pcf_sbi_send_tsn_bridge_relay(
 
     ogs_sbi_request_free(request);
 
-    ogs_info("[PCF] relayed TSN bridge to AF [%s] dsttMac[%s]",
+    ogs_info("[PCF] new-bridge notify to AF [%s] dsttPortMac[%s]",
             af_uri, ds_tt_mac ? ds_tt_mac : "");
 
     return rc;

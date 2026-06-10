@@ -894,7 +894,14 @@ bool smf_npcf_smpolicycontrol_handle_update_notify(
      * the QoS flows but does not carry the PMIC, so trigger a PFCP Session Modification
      * whose PDR-to-modify builder appends tsc_management_information. flags=0 keeps it
      * PMIC-only (modify_flags = OGS_PFCP_MODIFY_SESSION → no PDR/FAR change). */
-    if (sess->tsc_bridge.nwtt_pmic)
+    /* Only send a STANDALONE PMIC-only PFCP modify when smf_qos_flow_binding()
+     * did NOT already dispatch a QoS-flow modification (list empty) — same guard
+     * as the standalone N1 below. When a QoS flow was created (e.g. the TSC eth
+     * flow), a competing second PFCP/N1N2 corrupts the in-flight modify
+     * transaction (see comment below + [[project_smf_tscai_listwipe_crash_fix]]);
+     * the PMIC then rides the binding's modify path instead. */
+    if (sess->tsc_bridge.nwtt_pmic &&
+            ogs_list_count(&sess->qos_flow_to_modify_list) == 0)
         smf_5gc_pfcp_send_all_pdr_modification_request(
                 sess, NULL, OGS_PFCP_MODIFY_TSC, 0);
 

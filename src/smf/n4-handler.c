@@ -1346,7 +1346,6 @@ uint8_t smf_n4_handle_session_report_request(
     }
 
     if (report_type.usage_report) {
-        bool ds_tt_mac_learned = false;
         bearer = smf_default_bearer_in_sess(sess);
         for (i = 0; i < OGS_ARRAY_SIZE(pfcp_req->usage_report); i++) {
             ogs_pfcp_tlv_usage_report_session_report_request_t *use_rep =
@@ -1360,29 +1359,15 @@ uint8_t smf_n4_handle_session_report_request(
                 continue;
             urr_id = use_rep->urr_id.u32;
 
-            /* a DS-TT MAC reported by the NW-TT (Ethernet Traffic
-             * Information -> MAC Addresses Detected). It carries no volume
-             * measurement, so handle it and skip the volume/Gy path below
-             * (parse_volume_measurement on the absent IE would fault). */
+            /* Ethernet Traffic Information -> MAC Addresses Detected carries no
+             * volume measurement, so skip the volume/Gy path below (parsing the
+             * absent IE would fault). End-station MAC learning for CNC stream
+             * binding is NOT done here: the spec mechanism is IEEE 802.1AB LLDP
+             * connectivity discovery at the DS-TT/NW-TT (TS 23.501 5.28.1),
+             * reported to the AF out-of-band — not a UPF->SMF->PCF relay. */
             if (use_rep->ethernet_traffic_information.presence &&
                 use_rep->ethernet_traffic_information.
                         mac_addresses_detected.presence) {
-                /* Relay every new DS-TT MAC the UPF learns: pin_mac.py changes
-                 * the oaitap MAC after the first (random) frame, so the pinned
-                 * MAC arrives as a second PFCP report. Accept and relay it so
-                 * the AF can register the bridge under the deterministic MAC. */
-                uint8_t *m = use_rep->ethernet_traffic_information.
-                        mac_addresses_detected.data;
-                uint16_t mlen = use_rep->ethernet_traffic_information.
-                        mac_addresses_detected.len;
-                if (m && mlen >= 1 + 6 && m[0] >= 1) {
-                    memcpy(sess->tsc_bridge.ds_tt_mac, m + 1, 6);
-                    sess->tsc_bridge.has_ds_tt_mac = true;
-                    ds_tt_mac_learned = true;
-                    ogs_info("[SMF] DS-TT MAC "
-                        "[%02x:%02x:%02x:%02x:%02x:%02x] (PSI[%d])",
-                        m[1], m[2], m[3], m[4], m[5], m[6], sess->psi);
-                }
                 continue;
             }
 
@@ -1399,21 +1384,6 @@ uint8_t smf_n4_handle_session_report_request(
                     &rep_trig, &use_rep->usage_report_trigger);
             sess->gy.reporting_reason =
                 smf_pfcp_urr_usage_report_trigger2diam_gy_reporting_reason(&rep_trig);
-        }
-
-        /* relay the newly-learned DS-TT MAC to the PCF via an
-         * Npcf_SMPolicyControl_Update (TsnBridgeInfo.dsttAddr) so the AF can
-         * bind the N5 app-session by ueMac (TS 29.512/29.514). */
-        ogs_info("[SMF] MAC-update: learned=%d resource_uri=%p",
-                ds_tt_mac_learned,
-                ds_tt_mac_learned ? sess->policy_association.resource_uri : NULL);
-        if (ds_tt_mac_learned && sess->policy_association.resource_uri) {
-            int r = smf_sbi_discover_and_send(
-                    OGS_SBI_SERVICE_TYPE_NPCF_SMPOLICYCONTROL, NULL,
-                    smf_npcf_smpolicycontrol_build_update_tsn_bridge,
-                    sess, NULL, 0, NULL);
-            ogs_info("[SMF] MAC-update: discover_and_send r=%d", r);
-            ogs_expect(r == OGS_OK);
         }
 
         switch (smf_use_gy_iface()) {

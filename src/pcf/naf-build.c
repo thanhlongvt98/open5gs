@@ -48,24 +48,28 @@ end:
 }
 
 /*
- * option-3: PCF -> TSN AF bridge relay (TS 23.501 §5.28.1). When the PCF
- * learns the DS-TT MAC from the SMF's tsnBridgeInfo (TS 29.512), it POSTs the
- * 5GS bridge descriptor to the AF /v1/bridges. Body carries only spec-defined
- * fields: bridge_id, ds_tt_port, ds_tt_mac, nw_tt_port, nw_tt_mac,
- * ds_tt_resid_time_ns. NW-TT port/MAC come from env vars TSN_NW_TT_PORT /
- * TSN_NW_TT_MAC. No supi (not a spec field for the bridge descriptor).
+ * PCF -> TSN AF new-bridge notification (TS 29.514 §4.2.5.16 "Notification
+ * about TSC user plane node Information, no Individual Application Session
+ * Context exists"). When the SMF reports a new 5GS bridge (TsnBridgeInfo over
+ * N7, TS 29.512), the PCF POSTs a PduSessionTsnBridge to the AF's locally
+ * configured notification URI with the "new-bridge" segment appended.
+ *
+ * Body = PduSessionTsnBridge (TS 29.514 §5.6.2.40): the mandatory
+ * tsnBridgeInfo (bridgeId, dsttPortNum, dsttAddr = the DS-TT *port* MAC from
+ * N1, dsttResidTime = UE-DS-TT residence time in ns). We hand-serialize the
+ * JSON (same wire result as OpenAPI_pdu_session_tsn_bridge_convertToJSON,
+ * without the model ownership dance). NW-TT info is the AF's concern (it has
+ * no DS-TT-side N1 source) and is injected there from env.
  */
-ogs_sbi_request_t *pcf_naf_build_tsn_bridge_register(
+ogs_sbi_request_t *pcf_naf_build_tsn_bridge_new_bridge(
         const char *af_uri,
-        int bridge_id, int ds_tt_port, const char *ds_tt_mac)
+        int bridge_id, int ds_tt_port, const char *ds_tt_mac,
+        bool has_resid_time, int resid_time_ns)
 {
     ogs_sbi_message_t message;
     ogs_sbi_request_t *request = NULL;
     char *body = NULL;
-    const char *nw_tt_mac_env = getenv("TSN_NW_TT_MAC");
-    const char *nw_tt_port_env = getenv("TSN_NW_TT_PORT");
-    int nw_tt_port = nw_tt_port_env ? atoi(nw_tt_port_env) : 2;
-    const char *nw_tt_mac = nw_tt_mac_env ? nw_tt_mac_env : "";
+    char resid_field[48];
 
     ogs_assert(af_uri);
 
@@ -80,14 +84,19 @@ ogs_sbi_request_t *pcf_naf_build_tsn_bridge_register(
     request = ogs_sbi_build_request(&message);
     ogs_assert(request);
 
+    if (has_resid_time)
+        ogs_snprintf(resid_field, sizeof(resid_field),
+                ",\"dsttResidTime\":%d", resid_time_ns);
+    else
+        resid_field[0] = '\0';
+
     body = ogs_msprintf(
-            "{\"bridge_id\":%d,\"ds_tt_port\":%d,"
-            "\"ds_tt_mac\":\"%s\","
-            "\"nw_tt_port\":%d,\"nw_tt_mac\":\"%s\","
-            "\"ds_tt_resid_time_ns\":1000}",
+            "{\"tsnBridgeInfo\":{"
+            "\"bridgeId\":%d,\"dsttPortNum\":%d,"
+            "\"dsttAddr\":\"%s\"%s}}",
             bridge_id, ds_tt_port,
             ds_tt_mac ? ds_tt_mac : "",
-            nw_tt_port, nw_tt_mac);
+            resid_field);
     ogs_assert(body);
 
     request->http.content = body;          /* freed by ogs_sbi_request_free() */

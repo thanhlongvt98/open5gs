@@ -176,6 +176,9 @@ ED3(uint8_t spare:2;,
     ogs_ipfw_rule_t ipfw_rule;
     char *flow_description;
 
+    bool is_eth;                 /* TSN Ethernet packet filter (TS 24.501 §9.11.4.13) */
+    ogs_pf_content_t eth_content;
+
     ogs_pool_id_t bearer_id;
 } smf_pf_t;
 
@@ -528,10 +531,20 @@ typedef struct smf_sess_s {
          * managed-object blobs; freed in smf_sess_remove(). */
         char       *dstt_pmic;    /* DS-TT PMIC -> N1 NAS (TS 24.501 9.11.4.27)*/
         char       *nwtt_pmic;    /* NW-TT PMIC -> N4 PFCP (TS 29.244)         */
-        /* DS-TT MAC reported by the NW-TT (PFCP MAC Addresses Detected),
-         * relayed to the PCF (TsnBridgeInfo.dsttAddr) for ueMac N5 binding. */
-        uint8_t     ds_tt_mac[6];
-        bool        has_ds_tt_mac;
+        /* DS-TT *port* MAC: the assigned, globally-unique port identity supplied
+         * by the DS-TT over N1 in the PDU Session Establishment Request
+         * (TS 24.501 9.11.4.25, IEI 0x6E). Reported to the PCF as
+         * TsnBridgeInfo.dsttAddr. Per TS 23.501 5.28.1 NOTE 7 this is NOT a
+         * user-data MAC — it must never be confused with the end-station device
+         * MACs the UPF learns from UL traffic (those are the bridge FDB, relayed
+         * separately as learned MACs). */
+        uint8_t     ds_tt_port_mac[6];
+        bool        has_ds_tt_port_mac;
+        /* UE-DS-TT residence time, nanoseconds (TS 24.501 9.11.4.26, IEI 0x6F).
+         * The N1 IE carries the IEEE 1588-2019 correctionField (ns << 16); this
+         * field holds the decoded integer nanoseconds (correctionField >> 16). */
+        uint64_t    ds_tt_resid_time_ns;
+        bool        has_ds_tt_resid_time;
     } tsc_bridge;
 
     ogs_pool_id_t smf_ue_id;

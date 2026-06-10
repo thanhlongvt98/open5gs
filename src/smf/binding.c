@@ -24,6 +24,23 @@
 
 #include "ipfw/ipfw2.h"
 
+/*
+ * build_eth_pf_content - parse the PCF sentinel string and populate an
+ * ogs_pf_content_t with Ethernet packet filter components.
+ *
+ * Sentinel format (TS 24.501 §9.11.4.13):
+ *   "eth|<dstMAC>|<srcMAC>|<vid>|<pcp>|<ethertypeHex>"
+ * Each field is "-" when absent. MACs accept ':' or '-' as octet separator.
+ * vid and ethertype are stored host-order; the NAS encoder byte-swaps them.
+ * pcp_dei is stored as (pcp << 1) with DEI=0; UE compares the low nibble.
+ */
+static void build_eth_pf_content(const char *desc, ogs_pf_content_t *content)
+{
+    /* Parsing moved to lib/ipfw so the UPF DL classifier shares the exact same
+     * sentinel decode (TS 24.501 §9.11.4.13). */
+    ogs_pf_content_from_eth_sentinel(desc, content);
+}
+
 static void gtp_bearer_timeout(ogs_gtp_xact_t *xact, void *data)
 {
     smf_bearer_t *bearer = NULL;
@@ -302,6 +319,14 @@ void smf_bearer_binding(smf_sess_t *sess)
                 pf->direction = flow->direction;
                 pf->flow_description = ogs_strdup(flow->description);
                 ogs_assert(pf->flow_description);
+
+                /* TSN Ethernet sentinel: skip IP-only compile/swap/check */
+                if (strncmp(pf->flow_description, "eth|", 4) == 0) {
+                    build_eth_pf_content(pf->flow_description, &pf->eth_content);
+                    pf->is_eth = true;
+                    ogs_list_add(&bearer->pf_to_add_list, &pf->to_add_node);
+                    continue;
+                }
 
                 rv = ogs_ipfw_compile_rule(
                         &pf->ipfw_rule, pf->flow_description);
@@ -697,6 +722,14 @@ void smf_qos_flow_binding(smf_sess_t *sess)
                 pf->flow_description = ogs_strdup(flow->description);
                 ogs_assert(pf->flow_description);
 
+                /* TSN Ethernet sentinel: skip IP-only compile/swap/check */
+                if (strncmp(pf->flow_description, "eth|", 4) == 0) {
+                    build_eth_pf_content(pf->flow_description, &pf->eth_content);
+                    pf->is_eth = true;
+                    ogs_list_add(&qos_flow->pf_to_add_list, &pf->to_add_node);
+                    continue;
+                }
+
                 rv = ogs_ipfw_compile_rule(
                         &pf->ipfw_rule, pf->flow_description);
 /*
@@ -742,6 +775,29 @@ void smf_qos_flow_binding(smf_sess_t *sess)
             }
 
             if (qos_flow_created == true) {
+                /* The N3 DL tunnel (gNB TEID/IP) is per-PDU-session and was
+                 * already established on the default flow at session setup
+                 * (TS 23.501 §5.7.1: one N3 tunnel per PDU session, QFI
+                 * distinguishes flows). For a flow ADDED via modify the gNB
+                 * reuses that tunnel; in this OCUDU deployment the N1 QoS rule
+                 * is delivered via DL NAS Transport, so no PDU Session Resource
+                 * Modify Response arrives to run
+                 * ngap_handle_pdu_session_resource_modify_response_transfer(),
+                 * which is what normally copies sess->gnb_n3_{ip,teid} onto the
+                 * new flow's DL FAR. Without that, the new DL FAR egresses on
+                 * TEID 0 (frames lost). Copy the session N3 DL outer header
+                 * here so DL traffic on the new QoS flow rides the session
+                 * tunnel. */
+                if (qos_flow->dl_far && sess->gnb_n3_teid) {
+                    qos_flow->dl_far->apply_action = OGS_PFCP_APPLY_ACTION_FORW;
+                    ogs_assert(OGS_OK == ogs_pfcp_ip_to_outer_header_creation(
+                            &sess->gnb_n3_ip,
+                            &qos_flow->dl_far->outer_header_creation,
+                            &qos_flow->dl_far->outer_header_creation_len));
+                    qos_flow->dl_far->outer_header_creation.teid =
+                            sess->gnb_n3_teid;
+                }
+
                 smf_bearer_tft_update(qos_flow);
                 smf_bearer_qos_update(qos_flow);
 

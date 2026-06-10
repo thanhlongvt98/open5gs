@@ -67,6 +67,45 @@ int gsm_handle_pdu_session_establishment_request(
                 extended_protocol_configuration_options);
     }
 
+    /* TS 24.501 9.11.4.25 (IEI 0x6E): DS-TT Ethernet port MAC address.
+     * This is the authoritative DS-TT *port* MAC (TS 23.501 5.28.1 NOTE 7) —
+     * the assigned port identity supplied by the DS-TT over N1, NOT an
+     * end-station/user-data MAC. It is reported to the PCF as dsttAddr. */
+    if (pdu_session_establishment_request->presencemask &
+        OGS_NAS_5GS_PDU_SESSION_ESTABLISHMENT_REQUEST_DS_TT_ETHERNET_PORT_MAC_ADDRESS_PRESENT) {
+        ogs_nas_ds_tt_ethernet_port_mac_address_t *ie =
+            &pdu_session_establishment_request->ds_tt_ethernet_port_mac_address;
+        if (ie->length >= OGS_NAX_MAX_EHTERNET_MAC_ADDRESS_LEN) {
+            memcpy(sess->tsc_bridge.ds_tt_port_mac, ie->buffer,
+                    OGS_NAX_MAX_EHTERNET_MAC_ADDRESS_LEN);
+            sess->tsc_bridge.has_ds_tt_port_mac = true;
+            ogs_info("[SMF] N1 DS-TT port MAC "
+                "[%02x:%02x:%02x:%02x:%02x:%02x] (PSI[%d])",
+                ie->buffer[0], ie->buffer[1], ie->buffer[2],
+                ie->buffer[3], ie->buffer[4], ie->buffer[5], sess->psi);
+        }
+    }
+
+    /* TS 24.501 9.11.4.26 (IEI 0x6F): UE-DS-TT residence time. The 8 content
+     * octets are the IEEE 1588-2019 correctionField (big-endian, unit 2^-16 ns).
+     * Decode to integer nanoseconds = correctionField >> 16. */
+    if (pdu_session_establishment_request->presencemask &
+        OGS_NAS_5GS_PDU_SESSION_ESTABLISHMENT_REQUEST_UE_DS_TT_RESIDENCE_TIME_PRESENT) {
+        ogs_nas_ue_ds_tt_residence_time_t *ie =
+            &pdu_session_establishment_request->ue_ds_tt_residence_time;
+        if (ie->length >= 8) {
+            uint64_t cf = 0;
+            int i;
+            for (i = 0; i < 8; i++)
+                cf = (cf << 8) | ie->buffer[i];
+            sess->tsc_bridge.ds_tt_resid_time_ns = cf >> 16;
+            sess->tsc_bridge.has_ds_tt_resid_time = true;
+            ogs_info("[SMF] N1 UE-DS-TT residence time [%llu ns] (PSI[%d])",
+                (unsigned long long)sess->tsc_bridge.ds_tt_resid_time_ns,
+                sess->psi);
+        }
+    }
+
     r = smf_sbi_discover_and_send(OGS_SBI_SERVICE_TYPE_NUDM_SDM, NULL,
             smf_nudm_sdm_build_get,
             sess, stream, 0, (char *)OGS_SBI_RESOURCE_NAME_SM_DATA);

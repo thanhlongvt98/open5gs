@@ -17,6 +17,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <limits.h>
+
 #include "npcf-build.h"
 
 ogs_sbi_request_t *smf_npcf_smpolicycontrol_build_create(
@@ -488,8 +490,8 @@ ogs_sbi_request_t *smf_npcf_smpolicycontrol_build_update_tsn_bridge(
 
     ogs_assert(sess);
     ogs_assert(sess->policy_association.resource_uri);
-    ogs_info("[SMF] build_update_tsn_bridge: enter (has_mac=%d)",
-            sess->tsc_bridge.has_ds_tt_mac);
+    ogs_info("[SMF] build_update_tsn_bridge: enter (has_port_mac=%d)",
+            sess->tsc_bridge.has_ds_tt_port_mac);
 
     memset(&message, 0, sizeof(message));
     message.h.method = (char *)OGS_SBI_HTTP_METHOD_POST;
@@ -513,16 +515,29 @@ ogs_sbi_request_t *smf_npcf_smpolicycontrol_build_update_tsn_bridge(
     TsnBridgeInfo.bridge_id = (int)sess->smf_n4_seid;
     TsnBridgeInfo.is_dstt_port_num = true;
     TsnBridgeInfo.dstt_port_num = sess->tsc_bridge.ds_tt_port;
-    /* DS-TT port MAC (once learned via the NW-TT report) -> the PCF
-     * stores it + relays to the AF for ueMac N5 binding (TS 29.514). */
-    if (sess->tsc_bridge.has_ds_tt_mac) {
+    /* DS-TT *port* MAC: the assigned port identity from the N1 DS-TT Ethernet
+     * port MAC address IE (TS 24.501 9.11.4.25). The PCF relays it to the AF as
+     * the bridge's dsttAddr (TS 29.514 5.6.2.40). NOTE 7: this is the port
+     * identity, never a user-data / end-station MAC. */
+    if (sess->tsc_bridge.has_ds_tt_port_mac) {
         ogs_snprintf(dstt_mac_buf, sizeof(dstt_mac_buf),
                 "%02x:%02x:%02x:%02x:%02x:%02x",
-                sess->tsc_bridge.ds_tt_mac[0], sess->tsc_bridge.ds_tt_mac[1],
-                sess->tsc_bridge.ds_tt_mac[2], sess->tsc_bridge.ds_tt_mac[3],
-                sess->tsc_bridge.ds_tt_mac[4], sess->tsc_bridge.ds_tt_mac[5]);
+                sess->tsc_bridge.ds_tt_port_mac[0],
+                sess->tsc_bridge.ds_tt_port_mac[1],
+                sess->tsc_bridge.ds_tt_port_mac[2],
+                sess->tsc_bridge.ds_tt_port_mac[3],
+                sess->tsc_bridge.ds_tt_port_mac[4],
+                sess->tsc_bridge.ds_tt_port_mac[5]);
         /* Heap copy: the OpenAPI model frees dstt_addr; never a stack pointer. */
         TsnBridgeInfo.dstt_addr = ogs_strdup(dstt_mac_buf);
+    }
+    /* UE-DS-TT residence time, integer ns (TS 24.501 9.11.4.26 decoded). The
+     * OpenAPI model field is int; clamp rather than wrap on overflow. */
+    if (sess->tsc_bridge.has_ds_tt_resid_time) {
+        TsnBridgeInfo.is_dstt_resid_time = true;
+        TsnBridgeInfo.dstt_resid_time =
+            (sess->tsc_bridge.ds_tt_resid_time_ns > (uint64_t)INT_MAX) ?
+                INT_MAX : (int)sess->tsc_bridge.ds_tt_resid_time_ns;
     }
     SmPolicyUpdateContextData.tsn_bridge_info = &TsnBridgeInfo;
 
@@ -536,7 +551,8 @@ ogs_sbi_request_t *smf_npcf_smpolicycontrol_build_update_tsn_bridge(
         ogs_free(TsnBridgeInfo.dstt_addr);
     ogs_free(message.h.uri);
 
-    ogs_info("[SMF] tsnBridge update built (dsttAddr%s)",
-            sess->tsc_bridge.has_ds_tt_mac ? "=set" : "=none");
+    ogs_info("[SMF] tsnBridge update built (dsttAddr%s, resid%s)",
+            sess->tsc_bridge.has_ds_tt_port_mac ? "=set" : "=none",
+            sess->tsc_bridge.has_ds_tt_resid_time ? "=set" : "=none");
     return request;
 }

@@ -451,6 +451,19 @@ ogs_pfcp_pdr_t *ogs_pfcp_handle_create_pdr(ogs_pfcp_sess_t *sess,
             memcpy(&rule->ipfw, &oppsite_direction_rule->ipfw,
                     sizeof(rule->ipfw));
             ogs_ipfw_rule_swap(&rule->ipfw);
+
+            /* TSN Ethernet packet filter (TS 24.501 §9.11.4.13): the L2 match
+             * lives in eth_content, not ipfw, so carry it (and is_eth) to the
+             * opposite-direction rule too. Copied as-is (NOT swapped): the
+             * per-direction MAC interpretation is applied at match time in the
+             * UPF (upf_eth_frame_matches swap_mac — DL/CORE swaps, UL/ACCESS
+             * does not). Without this the UL (ACCESS) eth PDR falls back to IP
+             * matching, never matches the L2 frame, and the UPF drops every UL
+             * stream frame with a GTP-U Error Indication. */
+            if (oppsite_direction_rule->is_eth) {
+                rule->is_eth = true;
+                rule->eth_content = oppsite_direction_rule->eth_content;
+            }
         }
 
         /* If BID, Store SDF Filter ID */
@@ -468,8 +481,19 @@ ogs_pfcp_pdr_t *ogs_pfcp_handle_create_pdr(ogs_pfcp_sess_t *sess,
                     sdf_filter.flow_description,
                     sdf_filter.flow_description_len+1);
 
-            rv = ogs_ipfw_compile_rule(&rule->ipfw, flow_description);
-            ogs_assert(rv == OGS_OK);
+            /* TSN Ethernet packet filter sentinel (TS 24.501 §9.11.4.13): not
+             * an IPFW "permit" rule. Parse it into rule->eth_content so the UPF
+             * DL classifier (upf_eth_dl_forward) can match frames by L2 identity
+             * (dst MAC / VID / PCP / EtherType) and steer the TSN stream onto
+             * its dedicated QoS flow. rule->ipfw is left zeroed (no IP match). */
+            if (strncmp(flow_description, "eth|", 4) == 0) {
+                ogs_pf_content_from_eth_sentinel(
+                        flow_description, &rule->eth_content);
+                rule->is_eth = true;
+            } else {
+                rv = ogs_ipfw_compile_rule(&rule->ipfw, flow_description);
+                ogs_assert(rv == OGS_OK);
+            }
 
             ogs_free(flow_description);
 /*
@@ -819,8 +843,17 @@ ogs_pfcp_pdr_t *ogs_pfcp_handle_update_pdr(ogs_pfcp_sess_t *sess,
                         sdf_filter.flow_description,
                         sdf_filter.flow_description_len+1);
 
-                rv = ogs_ipfw_compile_rule(&rule->ipfw, flow_description);
-                ogs_assert(rv == OGS_OK);
+                /* TSN Ethernet packet filter sentinel (TS 24.501 §9.11.4.13):
+                 * not an IPFW rule. Parse into rule->eth_content for the UPF
+                 * DL L2 classifier; leave rule->ipfw zeroed (no IP match). */
+                if (strncmp(flow_description, "eth|", 4) == 0) {
+                    ogs_pf_content_from_eth_sentinel(
+                            flow_description, &rule->eth_content);
+                    rule->is_eth = true;
+                } else {
+                    rv = ogs_ipfw_compile_rule(&rule->ipfw, flow_description);
+                    ogs_assert(rv == OGS_OK);
+                }
 
                 ogs_free(flow_description);
     /*

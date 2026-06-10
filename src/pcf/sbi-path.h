@@ -57,11 +57,12 @@ bool pcf_sbi_send_smpolicycontrol_delete_notify(
 
 bool pcf_sbi_send_policyauthorization_terminate_notify(pcf_app_t *app);
 
-/* option-3: relay the 5GS bridge descriptor to the TSN AF (/v1/bridges).
- * Spec fields only (TS 23.501 §5.28.1): bridge_id, ds_tt_port, ds_tt_mac;
- * NW-TT info from env vars TSN_NW_TT_PORT / TSN_NW_TT_MAC. */
-bool pcf_sbi_send_tsn_bridge_relay(
-        int bridge_id, int ds_tt_port, const char *ds_tt_mac);
+/* PCF -> TSN AF new-bridge notification (TS 29.514 §4.2.5.16): POST a
+ * PduSessionTsnBridge to {notifUri}/new-bridge. tsnBridgeInfo = bridgeId,
+ * dsttPortNum, dsttAddr (DS-TT port MAC from N1), dsttResidTime (ns). */
+bool pcf_sbi_send_tsn_bridge_new_bridge(
+        int bridge_id, int ds_tt_port, const char *ds_tt_mac,
+        bool has_resid_time, int resid_time_ns);
 
 #ifdef __cplusplus
 }

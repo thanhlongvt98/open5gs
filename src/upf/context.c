@@ -412,11 +412,13 @@ void upf_sess_report_learned_mac(upf_sess_t *sess, const uint8_t *mac)
     ogs_assert(sess);
     ogs_assert(mac);
 
-    /* Report every new MAC: upf_sess_learn_mac() already deduplicates via the
-     * hash (only new MACs reach here), so each is reported once. This allows
-     * the pinned MAC (set by pin_mac.py after the first random frame) to be
-     * forwarded to the SMF → PCF → AF so the bridge is registered with the
-     * deterministic DS-TT MAC used in the 802.1Qcc stream. */
+    /* Report every new end-station device MAC the UPF learns on UL (TS 29.244
+     * §8.2.96 MAC Addresses Detected). upf_sess_learn_mac() dedupes via the hash
+     * (only new MACs reach here). NOTE: this is an END-STATION device MAC, NOT
+     * the DS-TT *port* identity (that comes over N1, TS 24.501 §9.11.4.25). The
+     * SMF no longer consumes this report for bridge registration — end-station
+     * FDB is now discovered via IEEE 802.1AB LLDP at the TTs (TS 23.501 §5.28.1).
+     * The UPF still learns the MAC locally for DL forwarding (upf_sess_find_by_mac). */
 
     /* The usage report is per-URR; ride the MAC on the session's first URR. */
     urr = ogs_list_first(&sess->pfcp.urr_list);
@@ -441,8 +443,8 @@ void upf_sess_report_learned_mac(upf_sess_t *sess, const uint8_t *mac)
         ogs_error("[UPF] MAC Addresses Detected report send failed");
         return;
     }
-    ogs_info("[UPF] reported DS-TT MAC [%02x:%02x:%02x:%02x:%02x:%02x] to SMF "
-            "(PFCP MAC Addresses Detected)",
+    ogs_info("[UPF] reported end-station MAC [%02x:%02x:%02x:%02x:%02x:%02x] to "
+            "SMF (PFCP MAC Addresses Detected)",
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 

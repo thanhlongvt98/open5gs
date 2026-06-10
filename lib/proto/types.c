@@ -901,7 +901,16 @@ static int flow_rx_to_gx(ogs_flow_t *rx_flow, ogs_flow_t *gx_flow)
     ogs_assert(rx_flow);
     ogs_assert(gx_flow);
 
-    if (!strncmp(rx_flow->description,
+    /* TSN Ethernet packet filter sentinel (TS 24.501 §9.11.4.13): not an IPFW
+     * "permit in/out" rule — preserve the direction the AF set and pass the
+     * description through unchanged so the SMF builds an Ethernet
+     * ogs_pf_content_t for the NAS QoS rule (see src/smf/binding.c). */
+    if (!strncmp(rx_flow->description, "eth|", strlen("eth|"))) {
+        gx_flow->direction = rx_flow->direction;
+        gx_flow->description = ogs_strdup(rx_flow->description);
+        ogs_assert(gx_flow->description);
+
+    } else if (!strncmp(rx_flow->description,
                 "permit out", strlen("permit out"))) {
         gx_flow->direction = OGS_FLOW_DOWNLINK_ONLY;
         gx_flow->description = ogs_strdup(rx_flow->description);
@@ -1139,6 +1148,20 @@ int ogs_pcc_rule_update_qos_from_media(
                         pcc_rule->qos.gbr.uplink +=
                             media_component->min_requested_bandwidth_ul;
                     }
+                }
+            } else if (gx_flow.direction == OGS_FLOW_BIDIRECTIONAL) {
+                /* TSN Ethernet flow (TS 24.501 §9.11.4.13) is bidirectional:
+                 * add both DL and UL GBR/MBR from the medComponent (for TSC,
+                 * the AF sets GBR == MBR and DL == UL). */
+                if (gx_flow.description) {
+                    pcc_rule->qos.mbr.downlink +=
+                        media_component->max_requested_bandwidth_dl;
+                    pcc_rule->qos.gbr.downlink +=
+                        media_component->min_requested_bandwidth_dl;
+                    pcc_rule->qos.mbr.uplink +=
+                        media_component->max_requested_bandwidth_ul;
+                    pcc_rule->qos.gbr.uplink +=
+                        media_component->min_requested_bandwidth_ul;
                 }
             } else
                 ogs_assert_if_reached();
