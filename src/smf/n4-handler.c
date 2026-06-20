@@ -968,18 +968,19 @@ void smf_5gc_n4_handle_session_modification_response(
         } else if (flags & OGS_PFCP_MODIFY_NETWORK_REQUESTED) {
             smf_n1_n2_message_transfer_param_t param;
 
-            ogs_assert(flags & OGS_PFCP_MODIFY_SESSION);
-
             /*
-             * TS24.501
-             * 6.2 General on elementary 5GSM procedures
-             * 6.2.1 Principles of PTI handling for 5GSM procedures
+             * TS 23.502 §4.3.3.2: PCF-initiated SM policy update → SMF
+             * issues one PFCP round-trip then one N1N2 transfer.
              *
-             * If a command message is not sent as result of
-             * a received request message, the sending entity shall
-             * include in the command message the PTI value set to
-             * "no procedure transaction identity assigned"
-             * (see examples in figure 6.2.1.4).
+             * When the new QoS flow was dispatched via the ONE-FLOW sender
+             * (smf_5gc_pfcp_send_one_qos_flow_modification_request, used for
+             * a single newly-created non-HR flow) OGS_PFCP_MODIFY_SESSION is
+             * NOT set — do not assert it here.  The list sender (used for HR
+             * and multi-flow) does set OGS_PFCP_MODIFY_SESSION; both reach
+             * this branch and are handled identically below.
+             *
+             * TS 24.501 §6.2.1: if no request triggered this command, set PTI
+             * to "no procedure transaction identity assigned".
              */
             sess->pti = OGS_NAS_PROCEDURE_TRANSACTION_IDENTITY_UNASSIGNED;
 
@@ -1739,6 +1740,19 @@ uint8_t smf_n4_handle_session_report_request(
             if (use_rep->urr_id.presence == 0)
                 continue;
             urr_id = use_rep->urr_id.u32;
+
+            /* Ethernet Traffic Information -> MAC Addresses Detected carries no
+             * volume measurement, so skip the volume/Gy path below (parsing the
+             * absent IE would fault). End-station MAC learning for CNC stream
+             * binding is NOT done here: the spec mechanism is IEEE 802.1AB LLDP
+             * connectivity discovery at the DS-TT/NW-TT (TS 23.501 5.28.1),
+             * reported to the AF out-of-band — not a UPF->SMF->PCF relay. */
+            if (use_rep->ethernet_traffic_information.presence &&
+                use_rep->ethernet_traffic_information.
+                        mac_addresses_detected.presence) {
+                continue;
+            }
+
             if (!bearer || !bearer->urr || bearer->urr->id != urr_id)
                 continue;
             decoded = ogs_pfcp_parse_volume_measurement(
@@ -1757,6 +1771,7 @@ uint8_t smf_n4_handle_session_report_request(
             sess->gy.reporting_reason =
                 smf_pfcp_urr_usage_report_trigger2diam_gy_reporting_reason(&rep_trig);
         }
+
         switch (smf_use_gy_iface()) {
         case 1:
             if (!sess->gy.final_unit) {

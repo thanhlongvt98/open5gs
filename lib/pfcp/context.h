@@ -191,6 +191,11 @@ typedef struct ogs_pfcp_pdr_s {
 
     uint8_t                 qfi;
 
+    /* Ethernet PDU Session Information (TS 29.244 §8.2.117): ETHI flag set on
+     * the PDI so the UPF treats matched traffic as Ethernet PDU-session frames.
+     * Set on the DL PDR for an Ethernet PDU session. */
+    bool                    ethernet_pdu_session_information;
+
     ogs_pfcp_far_t          *far;
 
     int                     num_of_urr;
@@ -213,6 +218,8 @@ typedef struct ogs_pfcp_pdr_s {
         };
         char *description;
         uint32_t sdf_filter_id;
+        bool is_eth;
+        ogs_pf_content_t eth_content;
     } flow[OGS_MAX_NUM_OF_FLOW_IN_PDR];;
 
     ogs_list_t              rule_list;      /* Rule List */
@@ -399,6 +406,11 @@ ED6(uint8_t     spare1:3;,
 
     ogs_ipfw_rule_t ipfw;
     uint32_t sdf_filter_id;
+
+    /* TSN Ethernet packet filter (TS 24.501 §9.11.4.13 / TS 29.244 §8.2.132):
+     * L2 filter carried via the PFCP Ethernet Packet Filter IE. */
+    bool is_eth;
+    ogs_pf_content_t eth_content;
 
     /* Related Context */
     ogs_pfcp_pdr_t  *pdr;

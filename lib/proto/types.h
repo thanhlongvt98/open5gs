@@ -28,6 +28,8 @@
 extern "C" {
 #endif /* __cplusplus */
 
+#include "ogs-pf-content.h"
+
 #define OGS_MAX_NUM_OF_SESS             4   /* Num of APN(Session) per UE */
 #define OGS_MAX_NUM_OF_BEARER           4   /* Num of Bearer per Session */
 #define OGS_BEARER_PER_UE               8   /* Num of Bearer per UE */
@@ -465,6 +467,27 @@ typedef struct ogs_bitrate_s {
 
 int ogs_check_br_conf(ogs_bitrate_t *br);
 
+/*
+ * Operator-defined Dynamic 5QI characteristics (TS 23.501 R17 §5.7.3).
+ * Carried CNC -> AF -> N5 -> PCF -> SMF so the SMF emits an NGAP
+ * Dynamic5QIDescriptor (TS 38.413 §9.3.1.18) instead of a standardized 5QI.
+ * When is_dynamic is false the QoS is a standardized (non-dynamic) 5QI and
+ * these fields are ignored.
+ */
+typedef struct ogs_dyn_5qi_s {
+    bool        is_dynamic;
+    uint8_t     five_qi;                /* Optional reference 5QI (§5.7.4); 0 = absent */
+    uint8_t     priority_level;         /* PriorityLevelQos 1..127 (§5.7.3.3) */
+    uint16_t    packet_delay_budget;    /* PacketDelayBudget, ms (§5.7.3.4) */
+    struct {
+        uint8_t scalar;                 /* pERScalar 0..9 */
+        uint8_t exponent;               /* pERExponent 0..9 */
+    } packet_error_rate;                /* PacketErrorRate (§5.7.3.5) */
+    bool        delay_critical;         /* Delay-critical resource type (§5.7.3.2) */
+    uint16_t    averaging_window;       /* AveragingWindow ms (§5.7.3.6); 0 = absent */
+    uint16_t    max_data_burst_volume;  /* MDBV bytes (§5.7.3.7); 0 = absent */
+} ogs_dyn_5qi_t;
+
 /**********************************
  * QoS Structure                 */
 typedef struct ogs_qos_s {
@@ -505,6 +528,11 @@ typedef struct ogs_qos_s {
 
     ogs_bitrate_t   mbr;  /* Maxmimum Bit Rate (MBR) */
     ogs_bitrate_t   gbr;  /* Guaranteed Bit Rate (GBR) */
+
+    /* Operator-defined Dynamic 5QI characteristics (TS 23.501 §5.7.3). When
+     * dyn_5qi.is_dynamic is set the SMF emits an NGAP Dynamic5QIDescriptor and
+     * `index` carries the (optional) non-standardized 5QI value. */
+    ogs_dyn_5qi_t   dyn_5qi;
 } ogs_qos_t;
 
 int ogs_check_qos_conf(ogs_qos_t *qos);
@@ -546,17 +574,39 @@ int ogs_check_qos_conf(ogs_qos_t *qos);
 #define OGS_FLOW_BIDIRECTIONAL    3
 typedef struct ogs_flow_s {
     uint8_t direction;
-    char *description;
+    char *description;  /* NULL when is_eth */
+    bool is_eth;
+    ogs_pf_content_t eth_content;
 } ogs_flow_t;
 
 #define OGS_FLOW_FREE(__fLOW) \
     do { \
-        if ((__fLOW)->description) { \
+        if ((__fLOW)->is_eth) { \
+            memset(&((__fLOW)->eth_content), 0, \
+                    sizeof((__fLOW)->eth_content)); \
+        } else if ((__fLOW)->description) { \
             ogs_free((__fLOW)->description); \
-        } \
-        else \
+        } else \
             ogs_assert_if_reached(); \
     } while(0)
+
+/**********************************
+ * TSCAI input container (TS 29.512 TscaiInputContainer / TS 23.501 Table
+ * 5.27.2-1). Internal POD mirror of OpenAPI_tscai_input_container_t carried on
+ * the PCC rule and media component. No heap members so the PCC store/free
+ * macros need no special handling.
+ */
+#define OGS_TSCAI_BAT_STR_LEN 48
+typedef struct ogs_tscai_input_s {
+    bool        present;
+    bool        is_periodicity;
+    uint32_t    periodicity;        /* microseconds */
+    char        burst_arrival_time[OGS_TSCAI_BAT_STR_LEN]; /* TS 29.571 string */
+    bool        is_sur_time_in_num_msg;
+    uint32_t    sur_time_in_num_msg;
+    bool        is_sur_time_in_time;
+    uint32_t    sur_time_in_time;   /* microseconds */
+} ogs_tscai_input_t;
 
 /**********************************
  * TS29.212
@@ -580,6 +630,10 @@ typedef struct ogs_pcc_rule_s {
     uint32_t rating_group;
 
     ogs_qos_t  qos;
+
+    /* TSCAI assistance carried on the PCC rule (TS 29.512). */
+    ogs_tscai_input_t tscai_input_dl;
+    ogs_tscai_input_t tscai_input_ul;
 } ogs_pcc_rule_t;
 
 #define OGS_STORE_PCC_RULE(__dST, __sRC) \
@@ -600,14 +654,24 @@ typedef struct ogs_pcc_rule_s {
         for (__iNDEX = 0; __iNDEX < (__sRC)->num_of_flow; __iNDEX++) { \
             (__dST)->flow[__iNDEX].direction = \
                 (__sRC)->flow[__iNDEX].direction; \
-            (__dST)->flow[__iNDEX].description = \
-                ogs_strdup((__sRC)->flow[__iNDEX].description);  \
-            ogs_assert((__dST)->flow[__iNDEX].description); \
+            (__dST)->flow[__iNDEX].is_eth = \
+                (__sRC)->flow[__iNDEX].is_eth; \
+            if ((__sRC)->flow[__iNDEX].is_eth) { \
+                (__dST)->flow[__iNDEX].description = NULL; \
+                (__dST)->flow[__iNDEX].eth_content = \
+                    (__sRC)->flow[__iNDEX].eth_content; \
+            } else { \
+                (__dST)->flow[__iNDEX].description = \
+                    ogs_strdup((__sRC)->flow[__iNDEX].description);  \
+                ogs_assert((__dST)->flow[__iNDEX].description); \
+            } \
         } \
         (__dST)->num_of_flow = (__sRC)->num_of_flow; \
         (__dST)->flow_status = (__sRC)->flow_status; \
         (__dST)->precedence = (__sRC)->precedence; \
         memcpy(&(__dST)->qos, &(__sRC)->qos, sizeof(ogs_qos_t)); \
+        (__dST)->tscai_input_dl = (__sRC)->tscai_input_dl; \
+        (__dST)->tscai_input_ul = (__sRC)->tscai_input_ul; \
     } while(0)
 
 #define OGS_PCC_RULE_FREE(__pCCrULE) \
@@ -980,6 +1044,14 @@ typedef struct ogs_media_component_s {
 #define OGS_MAX_NUM_OF_MEDIA_SUB_COMPONENT     8
     ogs_media_sub_component_t sub[OGS_MAX_NUM_OF_MEDIA_SUB_COMPONENT];
     int                 num_of_sub;
+
+    /* TSCAI assistance from the AF MediaComponent (TS 29.514). */
+    ogs_tscai_input_t   tscai_input_dl;
+    ogs_tscai_input_t   tscai_input_ul;
+
+    /* CNC-declared Dynamic 5QI characteristics from the AF MediaComponent
+     * (proprietary N5 extension; TS 23.501 §5.7.3 semantics). */
+    ogs_dyn_5qi_t       dyn_5qi;
 } ogs_media_component_t;
 
 #define OGS_MAX_NUM_OF_SPT 20

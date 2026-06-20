@@ -1534,6 +1534,10 @@ typedef struct ogs_pfcp_user_plane_report_s {
         ogs_pfcp_duration_measurement_t dur_measurement;
         ogs_pfcp_time_of_first_packet_t time_of_first_packet;
         ogs_pfcp_time_of_last_packet_t time_of_last_packet;
+        /* Ethernet Traffic Information -> MAC Addresses Detected
+         * (TS 29.244 §8.2.96). Pre-encoded IE payload: [count][MAC*6]... */
+        uint16_t mac_addresses_detected_len;
+        uint8_t  mac_addresses_detected[64];
     } usage_report [OGS_MAX_NUM_OF_URR];
     unsigned int num_of_usage_report;
     struct {

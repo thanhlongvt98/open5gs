@@ -121,6 +121,13 @@ OpenAPI_pcc_rule_t *ogs_sbi_build_pcc_rule(
 void ogs_sbi_free_pcc_rule(OpenAPI_pcc_rule_t *PccRule);
 OpenAPI_qos_data_t *ogs_sbi_build_qos_data(ogs_pcc_rule_t *pcc_rule);
 void ogs_sbi_free_qos_data(OpenAPI_qos_data_t *QosData);
+OpenAPI_qos_characteristics_t *ogs_sbi_build_qos_characteristics(
+        ogs_pcc_rule_t *pcc_rule);
+
+OpenAPI_eth_flow_description_t *ogs_eth_flow_description_from_pf_content(
+        const ogs_pf_content_t *content);
+void ogs_pf_content_from_eth_flow_description(
+        OpenAPI_eth_flow_description_t *src, ogs_pf_content_t *dst);
 
 #ifdef __cplusplus
 }

@@ -1989,6 +1989,10 @@ uint8_t smf_sess_set_ue_ip(smf_sess_t *sess)
                 sess->ipv4->addr, OGS_IPV4_LEN, sess);
         ogs_hash_set(smf_self()->ipv6_hash,
                 sess->ipv6->addr, OGS_IPV6_DEFAULT_PREFIX_LEN >> 3, sess);
+    } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_ETHERNET) {
+        /* Ethernet PDU session (TS 23.501 §5.6.10.2): no UE IP address. */
+        sess->ipv4 = NULL;
+        sess->ipv6 = NULL;
     } else {
         ogs_fatal("Invalid sess->session.session_type[%d]",
                 sess->session.session_type);
@@ -2172,6 +2176,8 @@ void smf_sess_remove(smf_sess_t *sess)
         ogs_free(sess->aaa_server_identifier.name);
     if (sess->aaa_server_identifier.realm)
         ogs_free(sess->aaa_server_identifier.realm);
+
+    smf_sess_tsc_remove(sess);
 
     smf_bearer_remove_all(sess);
 
@@ -3096,19 +3102,37 @@ void smf_bearer_tft_update(smf_bearer_t *bearer)
 
     ogs_list_for_each(&bearer->pf_list, pf) {
         if (pf->direction == OGS_FLOW_DOWNLINK_ONLY) {
-            dl_pdr->flow[dl_pdr->num_of_flow].fd = 1;
-            dl_pdr->flow[dl_pdr->num_of_flow].description =
-                pf->flow_description;
+            dl_pdr->flow[dl_pdr->num_of_flow].fd = pf->is_eth ? 0 : 1;
+            dl_pdr->flow[dl_pdr->num_of_flow].is_eth = pf->is_eth;
+            if (pf->is_eth) {
+                dl_pdr->flow[dl_pdr->num_of_flow].description = NULL;
+                dl_pdr->flow[dl_pdr->num_of_flow].eth_content = pf->eth_content;
+            } else {
+                dl_pdr->flow[dl_pdr->num_of_flow].description =
+                    pf->flow_description;
+            }
             dl_pdr->num_of_flow++;
         } else if (pf->direction == OGS_FLOW_UPLINK_ONLY) {
-            ul_pdr->flow[ul_pdr->num_of_flow].fd = 1;
-            ul_pdr->flow[ul_pdr->num_of_flow].description =
-                pf->flow_description;
+            ul_pdr->flow[ul_pdr->num_of_flow].fd = pf->is_eth ? 0 : 1;
+            ul_pdr->flow[ul_pdr->num_of_flow].is_eth = pf->is_eth;
+            if (pf->is_eth) {
+                ul_pdr->flow[ul_pdr->num_of_flow].description = NULL;
+                ul_pdr->flow[ul_pdr->num_of_flow].eth_content = pf->eth_content;
+            } else {
+                ul_pdr->flow[ul_pdr->num_of_flow].description =
+                    pf->flow_description;
+            }
             ul_pdr->num_of_flow++;
         } else if (pf->direction == OGS_FLOW_BIDIRECTIONAL) {
-            dl_pdr->flow[dl_pdr->num_of_flow].fd = 1;
-            dl_pdr->flow[dl_pdr->num_of_flow].description =
-                pf->flow_description;
+            dl_pdr->flow[dl_pdr->num_of_flow].fd = pf->is_eth ? 0 : 1;
+            dl_pdr->flow[dl_pdr->num_of_flow].is_eth = pf->is_eth;
+            if (pf->is_eth) {
+                dl_pdr->flow[dl_pdr->num_of_flow].description = NULL;
+                dl_pdr->flow[dl_pdr->num_of_flow].eth_content = pf->eth_content;
+            } else {
+                dl_pdr->flow[dl_pdr->num_of_flow].description =
+                    pf->flow_description;
+            }
             dl_pdr->flow[dl_pdr->num_of_flow].bid = 1;
             dl_pdr->flow[dl_pdr->num_of_flow].sdf_filter_id = pf->sdf_filter_id;
             dl_pdr->num_of_flow++;
