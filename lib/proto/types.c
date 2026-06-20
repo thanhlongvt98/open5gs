@@ -1235,7 +1235,11 @@ int ogs_pcc_rule_update_qos_from_media(
         ogs_media_sub_component_t *sub = &media_component->sub[i];
         /* Guard against double-counting: for TSN Ethernet sub-components the
          * PCF appends both the real data EthFlowDescription AND a gPTP
-         * catch-all flow (ethType 88F7), both BIDIRECTIONAL. */
+         * catch-all flow (eth|-|-|-|-|88f7), both BIDIRECTIONAL.  The
+         * media-component bandwidth (GBR == MBR, DL == UL for TSC per
+         * TS 26.114 §6.3) must be accumulated exactly once per sub-component,
+         * not once per BIDIRECTIONAL flow.  Reset the flag for every new
+         * sub-component so unrelated sub-components are still accumulated. */
         bool bidir_counted = false;
 
         for (j = 0; j < sub->num_of_flow &&
@@ -1377,7 +1381,7 @@ int ogs_pcc_rule_update_qos_from_media(
     if (pcc_rule->qos.gbr.uplink == 0)
         pcc_rule->qos.gbr.uplink = pcc_rule->qos.mbr.uplink;
 
-    /* Carry TSCAI assistance from the media component onto the PCC
+    /* Phase 6: carry TSCAI assistance from the media component onto the PCC
      * rule, so it is emitted on the SmPolicyDecision toward the SMF. */
     pcc_rule->tscai_input_dl = media_component->tscai_input_dl;
     pcc_rule->tscai_input_ul = media_component->tscai_input_ul;

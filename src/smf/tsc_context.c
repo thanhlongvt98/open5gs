@@ -1,5 +1,5 @@
 /*
- * SMF-local TSC context lifecycle.
+ * Phase 6 Step 1 — SMF-local TSC context lifecycle.
  *
  * See tsc_context.h for the data model and the Issue 6-B/6-C rationale.
  */
@@ -12,7 +12,7 @@ tsc_context_t *smf_sess_tsc_add(smf_sess_t *sess)
 
     ogs_assert(sess);
 
-    /* Idempotent: an existing context is updated in place. */
+    /* Idempotent: an existing context is updated in place (Step 2). */
     if (sess->tsc)
         return sess->tsc;
 
@@ -72,7 +72,7 @@ void smf_sess_tsc_derive(const tsc_context_t *tsc,
     *periodicity_5g = (uint32_t)tsc->periodicity_us;
 
     /* Burst arrival time is encoded only once the 5G-domain value exists
-     * (clock conversion). The raw TSN-domain value is never emitted. */
+     * (Phase-7 clock conversion). The raw TSN-domain value is never emitted. */
     *has_bat = (tsc->burst_arrival_time_5g != 0);
     *bat_5g = tsc->burst_arrival_time_5g;
 }

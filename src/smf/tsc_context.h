@@ -1,10 +1,10 @@
 /*
- * SMF-local TSC (Time-Sensitive Communication) context.
+ * Phase 6 Step 1 — SMF-local TSC (Time-Sensitive Communication) context.
  *
  * Frozen, SMF-local data model for per-session TSC assistance state on the
  * standards control-plane path (TSN AF -> PCF -> SMF -> NGAP). Holds the TSCAI
  * timing inputs received from upstream policy plus derived/status fields used
- * later for TSCAI derivation and downgrade decisions.
+ * later for TSCAI derivation (Step 3) and downgrade decisions (Step 4).
  *
  * Issue 6-B: this state is deliberately NOT placed in the shared
  * lib/proto/types.h schema. It is attached to smf_sess_t via a single nullable
@@ -66,14 +66,15 @@ typedef struct {
  *
  *   smf_sess_tsc_add():    allocate the per-session TSC context on first TSC
  *                          assistance; returns the existing context on repeat
- *                          (in-place update). Returns NULL only on
+ *                          (Step-2 in-place update). Returns NULL only on
  *                          allocation failure.
  *   smf_sess_tsc_remove(): free the context and reset sess->tsc to NULL.
  *
- * The context is removed on session release; the policy-driven add() call
- * fires on PCF -> SMF ingestion.
+ * Step 1 wires only the remove() on session release; the policy-driven add()
+ * call is added in Step 2 (PCF -> SMF ingestion).
  */
-/* Stable downgrade/partial reason strings (for scenario labeling). */
+/* Phase 6 Step 4: stable downgrade/partial reason strings (for Phase-7/8
+ * scenario labeling). */
 #define TSC_REASON_NO_PERIODICITY \
     "TSCAI missing mandatory periodicity; flow on baseline 5QI"
 #define TSC_REASON_PERIODICITY_RANGE \
@@ -85,7 +86,7 @@ tsc_context_t *smf_sess_tsc_add(smf_sess_t *sess);
 void           smf_sess_tsc_remove(smf_sess_t *sess);
 
 /*
- * Set the TSC status and record a concrete reason, logging the
+ * Phase 6 Step 4: set the TSC status and record a concrete reason, logging the
  * outcome (ogs_warn for PARTIAL/DOWNGRADED, ogs_info otherwise) so the baseline
  * fallback is explicit in worklog/logs/. reason may be NULL for ACTIVE/ABSENT.
  */
@@ -93,12 +94,12 @@ void smf_sess_tsc_set_status(tsc_context_t *tsc,
         tsc_status_t status, const char *reason);
 
 /*
- * Derive the RAN-facing TSCAI (5G clock domain) from the ingested context,
- * ready for NGAP encoding (TS 23.501 §5.7.3.4 / TS 29.512). Single-grandmaster
- * topology (TS 23.501 §5.27.1) -> rateRatio = 1 and UPF time-offset = 0, so
- * periodicity passes through unchanged. The 5G-domain burst arrival time is
- * produced by the clock conversion; until then it is absent (*has_bat = false)
- * and never substituted with the TSN-domain value.
+ * Phase 6 Step 3: derive the RAN-facing TSCAI (5G clock domain) from the
+ * ingested context, ready for NGAP encoding (TS 23.501 §5.7.3.4 / TS 29.512).
+ * Single-grandmaster topology (TS 23.501 §5.27.1) -> rateRatio = 1 and UPF
+ * time-offset = 0, so periodicity passes through unchanged. The 5G-domain burst
+ * arrival time is produced by the Phase-7 clock conversion; until then it is
+ * absent (*has_bat = false) and never substituted with the TSN-domain value.
  */
 void smf_sess_tsc_derive(const tsc_context_t *tsc,
         uint32_t *periodicity_5g, uint64_t *bat_5g, bool *has_bat);

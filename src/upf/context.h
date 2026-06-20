@@ -53,6 +53,7 @@ typedef struct upf_context_s {
     ogs_hash_t *smf_n4_f_seid_hash; /* hash table (SMF-N4-F-SEID) */
     ogs_hash_t *ipv4_hash;  /* hash table (IPv4 Address) */
     ogs_hash_t *ipv6_hash;  /* hash table (IPv6 Address) */
+    ogs_hash_t *mac_hash;   /* hash table (learned dst-MAC -> Ethernet sess) */
 
     /* IPv4 framed routes trie */
     struct upf_route_trie_node *ipv4_framed_routes;
@@ -68,6 +69,15 @@ struct upf_route_trie_node {
     struct upf_route_trie_node *right;
     upf_sess_t *sess;
 };
+
+#define UPF_MAC_ALEN 6
+
+/* A learned source MAC for an Ethernet PDU session. The mac[] field backs the
+ * key stored in upf_self()->mac_hash (the hash keeps the pointer, not a copy). */
+typedef struct upf_sess_mac_s {
+    ogs_lnode_t lnode;
+    uint8_t     mac[UPF_MAC_ALEN];
+} upf_sess_mac_t;
 
 /* Accounting: */
 typedef struct upf_sess_urr_acc_s {
@@ -124,6 +134,38 @@ typedef struct upf_sess_s {
     /* Accounting: */
     upf_sess_urr_acc_t urr_acc[OGS_MAX_NUM_OF_URR]; /* FIXME: This probably needs to be mved to a hashtable or alike */
     char            *apn_dnn;            /* APN/DNN Item */
+
+    /* UPF-local Ethernet PDU session correlation state (Phase 5 Step 1).
+     * SMF owns session/QoS intent; this is a UPF-local cache for NW-TT
+     * observability (Step 5) and Ethernet fast-path classification (Step 2).
+     * Deliberately NOT placed in the shared lib/pfcp (Issue 5-A). */
+    struct {
+        bool    ethernet;      /* session_type == OGS_PDU_SESSION_TYPE_ETHERNET */
+        uint8_t session_type;  /* OGS_PDU_SESSION_TYPE_* seen at N4 establishment */
+    } correlation;
+
+    /* NW-TT MAC-learning bridge (Phase 5 Step 4): the inner source MACs learned
+     * from UL frames on this Ethernet PDU session. Each entry's mac[] backs a
+     * key in upf_self()->mac_hash; the list lets us evict them on session
+     * removal. TS 23.501 §5.8.2.5.3 / §5.6.10.2. */
+    ogs_list_t      mac_list;
+
+    /* NW-TT bridge-port state from the standard PFCP TSC IEs (Phase 5 Step 3).
+     * Populated only when the SMF sends create_bridge_info_for_tsc / a PMIC over
+     * N4 (TS 29.244). UPF-local (Issue 5-A); the shared lib/pfcp is unchanged. */
+    struct {
+        bool     bridge;             /* create_bridge_info_for_tsc was received */
+        uint32_t ds_tt_port_number;  /* assigned per PDU session (this DS-TT port) */
+        bool     pmic_present;       /* a PMIC (PSFP tables) has been received */
+        uint32_t pmic_len;           /* length of the last PMIC (octets) */
+        void    *pmic;               /* 202606 Step 08: programmed PMIC blob   */
+        uint8_t  gate_pcp_mask;      /* 802.1Qbv gate allowed-PCP set parsed from the
+                                        PMIC; bit p set => PCP p is gated open. 0 => no
+                                        gate parsed (fail-open, enforce nothing). */
+        bool     mac_reported;       /* 202606: a learned end-station device MAC
+                                        was reported to the SMF (PFCP MAC Addresses
+                                        Detected). NOT the DS-TT port identity. */
+    } nwtt;
 } upf_sess_t;
 
 void upf_context_init(void);
@@ -142,10 +184,28 @@ upf_sess_t *upf_sess_find_by_smf_n4_f_seid(ogs_pfcp_f_seid_t *f_seid);
 upf_sess_t *upf_sess_find_by_upf_n4_seid(uint64_t seid);
 upf_sess_t *upf_sess_find_by_ipv4(uint32_t addr);
 upf_sess_t *upf_sess_find_by_ipv6(uint32_t *addr6);
+/* NW-TT MAC-learning bridge for Ethernet PDU sessions.
+ * upf_sess_learn_mac() records an inner source MAC seen on UL; the matching
+ * upf_sess_find_by_mac() resolves a DL frame's destination MAC to its session. */
+/* Returns true if the MAC was newly learned (not seen before for this session). */
+bool upf_sess_learn_mac(upf_sess_t *sess, const uint8_t *mac);
+upf_sess_t *upf_sess_find_by_mac(const uint8_t *mac);
+/* Report a newly-learned END-STATION device MAC to the SMF via PFCP Session
+ * Report (Ethernet Traffic Information -> MAC Addresses Detected, TS 29.244
+ * §8.2.96). This is NOT the DS-TT port identity (that comes over N1). Called
+ * once per unique MAC; the SMF no longer consumes it for bridge registration
+ * (end-station FDB is discovered via LLDP, TS 23.501 §5.28.1). */
+void upf_sess_report_learned_mac(upf_sess_t *sess, const uint8_t *mac);
 upf_sess_t *upf_sess_find_by_id(ogs_pool_id_t id);
 
 uint8_t upf_sess_set_ue_ip(upf_sess_t *sess,
         uint8_t session_type, ogs_pfcp_pdr_t *pdr);
+/* record the PDU session type as UPF-local correlation state
+ * (logs the creation for an Ethernet PDU session). */
+void upf_sess_set_correlation(upf_sess_t *sess, uint8_t session_type);
+/* assign a DS-TT port number for a 5GS-TSN-bridge PDU session
+ * (returned in the PFCP created_bridge_info_for_tsc IE). Monotonic, >= 1. */
+uint32_t upf_sess_assign_dstt_port(void);
 uint8_t upf_sess_set_ue_ipv4_framed_routes(upf_sess_t *sess,
         char *framed_routes[]);
 uint8_t upf_sess_set_ue_ipv6_framed_routes(upf_sess_t *sess,

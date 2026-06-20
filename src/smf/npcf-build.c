@@ -17,6 +17,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <limits.h>
+
 #include "npcf-build.h"
 
 ogs_sbi_request_t *smf_npcf_smpolicycontrol_build_create(
@@ -458,5 +460,92 @@ end:
     if (SmPolicyDeleteData.serving_network)
         ogs_sbi_free_plmn_id_nid(SmPolicyDeleteData.serving_network);
 
+    return request;
+}
+
+/*
+ * Npcf_SMPolicyControl_Update (SMF -> PCF, TS 29.512 §4.2.4).
+ * Report the 5GS TSN bridge information once the bridge port is established
+ * (DS-TT port assigned by the UPF). POST {smPolicyUri}/update with
+ * SmPolicyUpdateContextData { repPolicyCtrlReqTriggers:[TSN_BRIDGE_INFO],
+ * tsnBridgeInfo }. The PCF relays the bridge info to the TSN AF (N5).
+ */
+ogs_sbi_request_t *smf_npcf_smpolicycontrol_build_update_tsn_bridge(
+        smf_sess_t *sess, void *data)
+{
+    ogs_sbi_message_t message;
+    ogs_sbi_request_t *request = NULL;
+
+    OpenAPI_sm_policy_update_context_data_t SmPolicyUpdateContextData;
+    OpenAPI_tsn_bridge_info_t TsnBridgeInfo;
+    OpenAPI_list_t *TriggerList = NULL;
+    char dstt_mac_buf[18]; /* 202606: "xx:xx:xx:xx:xx:xx" + NUL */
+
+    ogs_assert(sess);
+    ogs_assert(sess->policy_association.resource_uri);
+    ogs_info("[SMF] build_update_tsn_bridge: enter (has_port_mac=%d)",
+            sess->tsc_bridge.has_ds_tt_port_mac);
+
+    memset(&message, 0, sizeof(message));
+    message.h.method = (char *)OGS_SBI_HTTP_METHOD_POST;
+    message.h.uri = ogs_msprintf("%s/%s",
+            sess->policy_association.resource_uri,
+            OGS_SBI_RESOURCE_NAME_UPDATE);
+    ogs_assert(message.h.uri);
+
+    memset(&SmPolicyUpdateContextData, 0, sizeof(SmPolicyUpdateContextData));
+    memset(&TsnBridgeInfo, 0, sizeof(TsnBridgeInfo));
+
+    /* repPolicyCtrlReqTriggers = [ TSN_BRIDGE_INFO ] */
+    TriggerList = OpenAPI_list_create();
+    ogs_assert(TriggerList);
+    OpenAPI_list_add(TriggerList,
+            (void *)OpenAPI_policy_control_request_trigger_TSN_BRIDGE_INFO);
+    SmPolicyUpdateContextData.rep_policy_ctrl_req_triggers = TriggerList;
+
+    /* tsnBridgeInfo: bridge id + the assigned DS-TT port number */
+    TsnBridgeInfo.is_bridge_id = true;
+    TsnBridgeInfo.bridge_id = (int)sess->smf_n4_seid;
+    TsnBridgeInfo.is_dstt_port_num = true;
+    TsnBridgeInfo.dstt_port_num = sess->tsc_bridge.ds_tt_port;
+    /* DS-TT *port* MAC: the assigned port identity from the N1 DS-TT Ethernet
+     * port MAC address IE (TS 24.501 9.11.4.25). The PCF relays it to the AF as
+     * the bridge's dsttAddr (TS 29.514 5.6.2.40). NOTE 7: this is the port
+     * identity, never a user-data / end-station MAC. */
+    if (sess->tsc_bridge.has_ds_tt_port_mac) {
+        ogs_snprintf(dstt_mac_buf, sizeof(dstt_mac_buf),
+                "%02x:%02x:%02x:%02x:%02x:%02x",
+                sess->tsc_bridge.ds_tt_port_mac[0],
+                sess->tsc_bridge.ds_tt_port_mac[1],
+                sess->tsc_bridge.ds_tt_port_mac[2],
+                sess->tsc_bridge.ds_tt_port_mac[3],
+                sess->tsc_bridge.ds_tt_port_mac[4],
+                sess->tsc_bridge.ds_tt_port_mac[5]);
+        /* Heap copy: the OpenAPI model frees dstt_addr; never a stack pointer. */
+        TsnBridgeInfo.dstt_addr = ogs_strdup(dstt_mac_buf);
+    }
+    /* UE-DS-TT residence time, integer ns (TS 24.501 9.11.4.26 decoded). The
+     * OpenAPI model field is int; clamp rather than wrap on overflow. */
+    if (sess->tsc_bridge.has_ds_tt_resid_time) {
+        TsnBridgeInfo.is_dstt_resid_time = true;
+        TsnBridgeInfo.dstt_resid_time =
+            (sess->tsc_bridge.ds_tt_resid_time_ns > (uint64_t)INT_MAX) ?
+                INT_MAX : (int)sess->tsc_bridge.ds_tt_resid_time_ns;
+    }
+    SmPolicyUpdateContextData.tsn_bridge_info = &TsnBridgeInfo;
+
+    message.SmPolicyUpdateContextData = &SmPolicyUpdateContextData;
+
+    request = ogs_sbi_build_request(&message);
+    ogs_expect(request);
+
+    OpenAPI_list_free(TriggerList);
+    if (TsnBridgeInfo.dstt_addr)
+        ogs_free(TsnBridgeInfo.dstt_addr);
+    ogs_free(message.h.uri);
+
+    ogs_info("[SMF] tsnBridge update built (dsttAddr%s, resid%s)",
+            sess->tsc_bridge.has_ds_tt_port_mac ? "=set" : "=none",
+            sess->tsc_bridge.has_ds_tt_resid_time ? "=set" : "=none");
     return request;
 }

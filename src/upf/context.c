@@ -63,6 +63,9 @@ void upf_context_init(void)
     ogs_assert(self.ipv4_hash);
     self.ipv6_hash = ogs_hash_make();
     ogs_assert(self.ipv6_hash);
+    /* NW-TT bridge MAC table: learned dst-MAC -> Ethernet PDU session. */
+    self.mac_hash = ogs_hash_make();
+    ogs_assert(self.mac_hash);
 
     context_initialized = 1;
 }
@@ -92,6 +95,8 @@ void upf_context_final(void)
     ogs_hash_destroy(self.ipv4_hash);
     ogs_assert(self.ipv6_hash);
     ogs_hash_destroy(self.ipv6_hash);
+    ogs_assert(self.mac_hash);
+    ogs_hash_destroy(self.mac_hash);
 
     free_upf_route_trie_node(self.ipv4_framed_routes);
     free_upf_route_trie_node(self.ipv6_framed_routes);
@@ -242,6 +247,20 @@ int upf_sess_remove(upf_sess_t *sess)
         ogs_pfcp_ue_ip_free(sess->ipv6);
     }
 
+    /* free the programmed NW-TT PMIC blob. */
+    if (sess->nwtt.pmic)
+        ogs_free(sess->nwtt.pmic);
+
+    /* Evict any MACs this Ethernet PDU session learned from the bridge table. */
+    if (ogs_list_first(&sess->mac_list)) {
+        upf_sess_mac_t *mac_entry = NULL, *mac_next = NULL;
+        ogs_list_for_each_safe(&sess->mac_list, mac_next, mac_entry) {
+            ogs_hash_set(self.mac_hash, mac_entry->mac, UPF_MAC_ALEN, NULL);
+            ogs_list_remove(&sess->mac_list, mac_entry);
+            ogs_free(mac_entry);
+        }
+    }
+
     upf_sess_set_ue_ipv4_framed_routes(sess, NULL);
     upf_sess_set_ue_ipv6_framed_routes(sess, NULL);
 
@@ -354,6 +373,86 @@ upf_sess_t *upf_sess_find_by_ipv6(uint32_t *addr6)
             trie = trie->left;
     }
     return ret;
+}
+
+bool upf_sess_learn_mac(upf_sess_t *sess, const uint8_t *mac)
+{
+    upf_sess_mac_t *entry = NULL;
+
+    ogs_assert(sess);
+    ogs_assert(mac);
+    ogs_assert(self.mac_hash);
+
+    /* Already mapped to this session — nothing to learn. */
+    if (ogs_hash_get(self.mac_hash, mac, UPF_MAC_ALEN) == sess)
+        return false;
+
+    entry = ogs_calloc(1, sizeof(*entry));
+    ogs_assert(entry);
+    memcpy(entry->mac, mac, UPF_MAC_ALEN);
+    ogs_list_add(&sess->mac_list, entry);
+
+    /* The hash keeps the key pointer (entry->mac), not a copy. If this MAC was
+     * previously mapped to another session, ogs_hash_set rebinds the value to
+     * this session (the old owner still drops its stale node on removal). */
+    ogs_hash_set(self.mac_hash, entry->mac, UPF_MAC_ALEN, sess);
+
+    ogs_info("[UPF] NW-TT learned MAC "
+            "[%02x:%02x:%02x:%02x:%02x:%02x] -> UPF-N4-SEID[0x%llx]",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+            (unsigned long long)sess->upf_n4_seid);
+    return true;
+}
+
+void upf_sess_report_learned_mac(upf_sess_t *sess, const uint8_t *mac)
+{
+    ogs_pfcp_user_plane_report_t report;
+    ogs_pfcp_urr_t *urr = NULL;
+
+    ogs_assert(sess);
+    ogs_assert(mac);
+
+    /* Report every new end-station device MAC the UPF learns on UL (TS 29.244
+     * §8.2.96 MAC Addresses Detected). upf_sess_learn_mac() dedupes via the hash
+     * (only new MACs reach here). NOTE: this is an END-STATION device MAC, NOT
+     * the DS-TT *port* identity (that comes over N1, TS 24.501 §9.11.4.25). The
+     * SMF no longer consumes this report for bridge registration — end-station
+     * FDB is now discovered via IEEE 802.1AB LLDP at the TTs (TS 23.501 §5.28.1).
+     * The UPF still learns the MAC locally for DL forwarding (upf_sess_find_by_mac). */
+
+    /* The usage report is per-URR; ride the MAC on the session's first URR. */
+    urr = ogs_list_first(&sess->pfcp.urr_list);
+    if (!urr) {
+        ogs_warn("[UPF] no URR to carry MAC Addresses Detected; skip MAC report");
+        return;
+    }
+
+    memset(&report, 0, sizeof(report));
+    report.type.usage_report = 1;
+    report.num_of_usage_report = 1;
+    report.usage_report[0].id = urr->id;
+    report.usage_report[0].seqn = 0;
+    report.usage_report[0].rep_trigger.mac_addresses_reporting = 1;
+
+    /* MAC Addresses Detected IE payload: [count=1][6-byte MAC] (TS 29.244 §8.2.96). */
+    report.usage_report[0].mac_addresses_detected[0] = 1;
+    memcpy(&report.usage_report[0].mac_addresses_detected[1], mac, UPF_MAC_ALEN);
+    report.usage_report[0].mac_addresses_detected_len = 1 + UPF_MAC_ALEN;
+
+    if (upf_pfcp_send_session_report_request(sess, &report) != OGS_OK) {
+        ogs_error("[UPF] MAC Addresses Detected report send failed");
+        return;
+    }
+    ogs_info("[UPF] reported end-station MAC [%02x:%02x:%02x:%02x:%02x:%02x] to "
+            "SMF (PFCP MAC Addresses Detected)",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
+upf_sess_t *upf_sess_find_by_mac(const uint8_t *mac)
+{
+    ogs_assert(mac);
+    ogs_assert(self.mac_hash);
+    return ogs_hash_get(self.mac_hash, mac, UPF_MAC_ALEN);
 }
 
 upf_sess_t *upf_sess_find_by_id(ogs_pool_id_t id)
@@ -503,6 +602,34 @@ uint8_t upf_sess_set_ue_ip(upf_sess_t *sess,
         sess->ipv6 ? OGS_INET6_NTOP(&sess->ipv6->addr, buf2) : "");
 
     return cause_value;
+}
+
+void upf_sess_set_correlation(upf_sess_t *sess, uint8_t session_type)
+{
+    ogs_assert(sess);
+
+    sess->correlation.session_type = session_type;
+    sess->correlation.ethernet =
+        (session_type == OGS_PDU_SESSION_TYPE_ETHERNET);
+
+    /* Log only for Ethernet PDU sessions: this is the UPF-local correlation
+     * state used later for NW-TT observability and fast-path classification.
+     * IP sessions keep the common path quiet. */
+    if (sess->correlation.ethernet)
+        ogs_info("[UPF] Ethernet PDU session correlation state created "
+                 "(UPF-SEID[0x%llx] SMF-SEID[0x%llx] DNN[%s])",
+                 (unsigned long long)sess->upf_n4_seid,
+                 (unsigned long long)sess->smf_n4_f_seid.seid,
+                 sess->apn_dnn ? sess->apn_dnn : "");
+}
+
+uint32_t upf_sess_assign_dstt_port(void)
+{
+    /* Monotonic DS-TT port allocator for 5GS-TSN-bridge PDU sessions. Port
+     * numbers must be unique within the bridge and stable per session; a simple
+     * counter satisfies that for the NW-TT. Starts at 1 (0 = unassigned). */
+    static uint32_t next_dstt_port = 1;
+    return next_dstt_port++;
 }
 
 /* Remove amd free framed ROUTE from TRIE. It isn't an error if the framed

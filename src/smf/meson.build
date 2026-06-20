@@ -38,6 +38,7 @@ libsmf_sources = files('''
     event.h
     timer.h
     context.h
+    tsc_context.h
     smf-sm.h
     gtp-path.h
     gn-build.h
@@ -72,13 +73,11 @@ libsmf_sources = files('''
     metrics.h
     pdu-info.h
 
-    tsc_context.h
-
     init.c
     event.c
     timer.c
-    tsc_context.c
     context.c
+    tsc_context.c
     smf-sm.c
     gsm-sm.c
     pfcp-sm.c

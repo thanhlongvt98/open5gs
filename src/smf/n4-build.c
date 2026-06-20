@@ -79,6 +79,18 @@ ogs_pkbuf_t *smf_n4_build_session_establishment_request(
     req->cp_f_seid.data = &f_seid;
     req->cp_f_seid.len = len;
 
+    /* request a 5GS-TSN-bridge port for an Ethernet PDU session
+     * (TS 29.244 create_bridge_info_for_tsc, IE 194). The single octet carries
+     * the BII (Bridge Information Indication) flag; the UPF replies with the
+     * assigned DS-TT port in created_bridge_info_for_tsc. */
+    if (sess->session.session_type == OGS_PDU_SESSION_TYPE_ETHERNET) {
+        static const uint8_t bii = 0x01; /* BII flag; valid through build_msg */
+        sess->tsc_bridge.bridge = true;
+        req->create_bridge_info_for_tsc.presence = 1;
+        req->create_bridge_info_for_tsc.data = (void *)&bii;
+        req->create_bridge_info_for_tsc.len = sizeof(bii);
+    }
+
     ogs_pfcp_pdrbuf_init();
 
     /* Create PDR */
@@ -337,6 +349,26 @@ ogs_pkbuf_t *smf_n4_build_pdr_to_modify_list(
     ogs_assert(num_of_remove_pdr + num_of_remove_far + num_of_create_pdr +
             num_of_create_far + num_of_update_pdr + num_of_update_far +
             num_of_update_qer + num_of_update_urr);
+
+    /* deliver the NW-TT PMIC to the UPF over N4 (TS 29.244
+     * tsc_management_information). port_management_information_container is the
+     * opaque managed-object blob; nw_tt_port_number is 4-octet big-endian. */
+    if (sess->tsc_bridge.nwtt_pmic) {
+        static uint32_t nw_tt_be; /* valid through ogs_pfcp_build_msg() */
+        nw_tt_be = htobe32(sess->tsc_bridge.nw_tt_port);
+        req->tsc_management_information.presence = 1;
+        req->tsc_management_information.
+            port_management_information_container.presence = 1;
+        req->tsc_management_information.
+            port_management_information_container.data =
+                sess->tsc_bridge.nwtt_pmic;
+        req->tsc_management_information.
+            port_management_information_container.len =
+                strlen(sess->tsc_bridge.nwtt_pmic);
+        req->tsc_management_information.nw_tt_port_number.presence = 1;
+        req->tsc_management_information.nw_tt_port_number.data = &nw_tt_be;
+        req->tsc_management_information.nw_tt_port_number.len = sizeof(nw_tt_be);
+    }
 
     pfcp_message->h.type = type;
     pkbuf = ogs_pfcp_build_msg(pfcp_message);

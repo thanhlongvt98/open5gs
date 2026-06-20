@@ -476,7 +476,7 @@ typedef struct ogs_dyn_5qi_s {
     bool        is_dynamic;
     uint8_t     five_qi;                /* Optional reference 5QI (§5.7.4); 0 = absent */
     uint8_t     priority_level;         /* PriorityLevelQos 1..127 (§5.7.3.3) */
-    uint16_t    packet_delay_budget;    /* PacketDelayBudget, ms (§5.7.3.4) */
+    uint16_t    packet_delay_budget;    /* PacketDelayBudget, NGAP units (§5.7.3.4) */
     struct {
         uint8_t scalar;                 /* pERScalar 0..9 */
         uint8_t exponent;               /* pERExponent 0..9 */
@@ -588,7 +588,7 @@ typedef struct ogs_flow_s {
  * TSCAI input container (TS 29.512 TscaiInputContainer / TS 23.501 Table
  * 5.27.2-1). Internal POD mirror of OpenAPI_tscai_input_container_t carried on
  * the PCC rule and media component. No heap members so the PCC store/free
- * macros need no special handling.
+ * macros need no special handling. Phase 6.
  */
 #define OGS_TSCAI_BAT_STR_LEN 48
 typedef struct ogs_tscai_input_s {
@@ -625,7 +625,7 @@ typedef struct ogs_pcc_rule_s {
 
     ogs_qos_t  qos;
 
-    /* TSCAI assistance carried on the PCC rule (TS 29.512). */
+    /* Phase 6: TSCAI assistance carried on the PCC rule (TS 29.512). */
     ogs_tscai_input_t tscai_input_dl;
     ogs_tscai_input_t tscai_input_ul;
 } ogs_pcc_rule_t;
@@ -1031,7 +1031,7 @@ typedef struct ogs_media_component_s {
     ogs_media_sub_component_t sub[OGS_MAX_NUM_OF_MEDIA_SUB_COMPONENT];
     int                 num_of_sub;
 
-    /* TSCAI assistance from the AF MediaComponent (TS 29.514). */
+    /* Phase 6: TSCAI assistance from the AF MediaComponent (TS 29.514). */
     ogs_tscai_input_t   tscai_input_dl;
     ogs_tscai_input_t   tscai_input_ul;
 

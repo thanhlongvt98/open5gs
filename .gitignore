@@ -7,4 +7,6 @@ subprojects/prometheus-client-c
 subprojects/usrsctp
 
 webui/.next
-.cache
+
+# clangd index cache (compile-commands workflow)
+.cache/
