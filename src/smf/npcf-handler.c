@@ -28,9 +28,9 @@
 #include "npcf-handler.h"
 
 /* ingest the standard TSCAI input containers from a PCC rule
- * (TS 29.512) into the SMF-local TSC context. Direction is implicit in
+ * (TS 29.512) into the SMF-local TSC context (Step 1). Direction is implicit in
  * DL vs UL container presence (TS 23.501 Table 5.27.2-1). Clock conversion of
- * the burst arrival time is deferred; the raw value is stored as the
+ * the burst arrival time is deferred (Phase 7); the raw value is stored as the
  * TSN-clock field. */
 static void smf_tsc_ingest_pcc_rule(
         smf_sess_t *sess, OpenAPI_pcc_rule_t *PccRule)
@@ -313,20 +313,14 @@ static void update_authorized_pcc_rule_and_qos(
                         continue;
                     }
 
-                    if (FlowInformation->eth_flow_description) {
-                        flow->is_eth = true;
-                        flow->description = NULL;
-                        ogs_pf_content_from_eth_flow_description(
-                                FlowInformation->eth_flow_description,
-                                &flow->eth_content);
-                    } else if (FlowInformation->flow_description) {
-                        flow->description =
-                            ogs_strdup(FlowInformation->flow_description);
-                        ogs_assert(flow->description);
-                    } else {
-                        ogs_error("No FlowDescription or EthFlowDescription");
+                    if (!FlowInformation->flow_description) {
+                        ogs_error("No FlowDescription");
                         continue;
                     }
+
+                    flow->description =
+                        ogs_strdup(FlowInformation->flow_description);
+                    ogs_assert(flow->description);
 
                     pcc_rule->num_of_flow++;
                 }
@@ -421,6 +415,14 @@ static void update_authorized_pcc_rule_and_qos(
                 }
             }
 
+            /* True TSC burst transported on the PccRule (TS 38.413 §9.3.1.28 / TS 23.501
+             * §5.7.3.7): emitted as the NonDynamic5QI MDBV. The PCF sets this only on a
+             * standardized 5QI (is_dynamic == false); guard on !is_dynamic so a dynamic
+             * flow that carried its own QosChars MDBV is never overwritten. */
+            if (PccRule->is_max_data_burst_vol && !pcc_rule->qos.dyn_5qi.is_dynamic)
+                pcc_rule->qos.dyn_5qi.max_data_burst_volume =
+                    (uint16_t)PccRule->max_data_burst_vol;  /* PCF clamped to UINT16_MAX */
+
             if (pcc_rule->qos.mbr.downlink || pcc_rule->qos.mbr.uplink ||
                 pcc_rule->qos.gbr.downlink || pcc_rule->qos.gbr.uplink) {
                 if (pcc_rule->qos.mbr.downlink == 0 ||
@@ -442,6 +444,31 @@ static void update_authorized_pcc_rule_and_qos(
             smf_tsc_ingest_pcc_rule(sess, PccRule);
 
             sess->policy.num_of_pcc_rule++;
+        }
+    }
+
+    /* ingest the per-port PMIC containers the AF pushed
+     * (SmPolicyDecision.tsn_port_man_cont_*, TS 29.512) into SMF-local bridge
+     * state, to be built down to the TTs over N4 (NW-TT) and N1 (DS-TT). */
+    if (SmPolicyDecision->tsn_port_man_cont_dstt &&
+            SmPolicyDecision->tsn_port_man_cont_dstt->port_man_cont) {
+        if (sess->tsc_bridge.dstt_pmic)
+            ogs_free(sess->tsc_bridge.dstt_pmic);
+        sess->tsc_bridge.dstt_pmic = ogs_strdup(
+                SmPolicyDecision->tsn_port_man_cont_dstt->port_man_cont);
+        ogs_info("[SMF] TSC DS-TT PMIC received (PSI[%d])", sess->psi);
+    }
+    if (SmPolicyDecision->tsn_port_man_cont_nwtts &&
+            SmPolicyDecision->tsn_port_man_cont_nwtts->first) {
+        OpenAPI_port_management_container_t *nwtt =
+            SmPolicyDecision->tsn_port_man_cont_nwtts->first->data;
+        if (nwtt && nwtt->port_man_cont) {
+            if (sess->tsc_bridge.nwtt_pmic)
+                ogs_free(sess->tsc_bridge.nwtt_pmic);
+            sess->tsc_bridge.nwtt_pmic = ogs_strdup(nwtt->port_man_cont);
+            sess->tsc_bridge.nw_tt_port = nwtt->port_num;
+            ogs_info("[SMF] TSC NW-TT PMIC received: port[%d] (PSI[%d])",
+                    nwtt->port_num, sess->psi);
         }
     }
 }
@@ -941,6 +968,51 @@ bool smf_npcf_smpolicycontrol_handle_update_notify(
     ogs_assert(true == ogs_sbi_send_http_status_no_content(stream));
 
     smf_qos_flow_binding(sess);
+
+    /* Deliver the NW-TT PMIC to the UPF over N4 (TS 29.244). The policy update carries
+     * the CNC's 802.1Qbv gate (PMIC) post-establishment; smf_qos_flow_binding refreshes
+     * the QoS flows but does not carry the PMIC, so trigger a PFCP Session Modification
+     * whose PDR-to-modify builder appends tsc_management_information. flags=0 keeps it
+     * PMIC-only (modify_flags = OGS_PFCP_MODIFY_SESSION → no PDR/FAR change). */
+    /* Only send a STANDALONE PMIC-only PFCP modify when smf_qos_flow_binding()
+     * did NOT already dispatch a QoS-flow modification (list empty) — same guard
+     * as the standalone N1 below. When a QoS flow was created (e.g. the TSC eth
+     * flow), a competing second PFCP/N1N2 corrupts the in-flight modify
+     * transaction (see comment below + [[project_smf_tscai_listwipe_crash_fix]]);
+     * the PMIC then rides the binding's modify path instead. */
+    if (sess->tsc_bridge.nwtt_pmic &&
+            ogs_list_count(&sess->qos_flow_to_modify_list) == 0)
+        smf_5gc_pfcp_send_all_pdr_modification_request(
+                sess, NULL, OGS_PFCP_MODIFY_TSC, 0, 0);
+
+    /* Deliver the DS-TT PMIC to the UE over N1 (TS 24.501 §8.3.2 / §9.11.4.27) — but ONLY
+     * when smf_qos_flow_binding() above did NOT dispatch a QoS-flow modification.
+     *
+     * When the policy update creates/modifies a QoS flow (e.g. the delay-critical GBR flow
+     * for a TSN bridge), smf_qos_flow_binding() leaves that flow on
+     * sess->qos_flow_to_modify_list and fires an asynchronous PFCP Session Modification
+     * whose transaction still references that list. The PFCP response then drives the
+     * network-requested modification in smf_5gc_n4_handle_session_modification_response(),
+     * which sends a SINGLE N1N2 transfer (TS 23.502 §4.3.3.2: one PFCP round-trip, then one
+     * N1N2): its N1 already carries the DS-TT PMIC (gsm_build_pdu_session_modification_command
+     * appends it unconditionally) and its N2 already carries the TSCAI
+     * (ngap_build_pdu_session_resource_modify_request_transfer attaches the TSCTrafficChar-
+     * acteristics for the TSC flow when ACTIVE). Sending a second, competing N1N2 here — or
+     * re-initialising sess->qos_flow_to_modify_list while the PFCP xact still depends on it —
+     * corrupts that transaction and aborts the SMF (ogs_nas_build_qos_rules: num_of_rule).
+     *
+     * So only the PMIC-only case (no QoS-flow change, list empty) needs a standalone N1: a
+     * pure N1 PDU Session Modification Command (codes (0,0)) that appends the DS-TT PMIC. */
+    if (ogs_list_count(&sess->qos_flow_to_modify_list) == 0 &&
+            sess->tsc_bridge.dstt_pmic) {
+        smf_n1_n2_message_transfer_param_t param;
+        sess->pti = OGS_NAS_PROCEDURE_TRANSACTION_IDENTITY_UNASSIGNED;
+        memset(&param, 0, sizeof(param));
+        param.state = SMF_NETWORK_REQUESTED_QOS_FLOW_MODIFICATION;
+        param.n1smbuf = gsm_build_pdu_session_modification_command(sess, 0, 0);
+        ogs_assert(param.n1smbuf);
+        smf_namf_comm_send_n1_n2_message_transfer(sess, NULL, &param);
+    }
 
     return true;
 

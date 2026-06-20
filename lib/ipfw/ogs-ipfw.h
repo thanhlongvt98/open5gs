@@ -25,7 +25,6 @@ extern "C" {
 #endif
 
 #include "proto/ogs-proto.h"
-#include "ogs-pf-content.h"
 
 typedef struct ogs_ipfw_rule_s {
     uint8_t proto;
@@ -87,16 +86,73 @@ ogs_ipfw_rule_t *ogs_ipfw_copy_and_swap(
         ogs_ipfw_rule_t *dst, ogs_ipfw_rule_t *src);
 void ogs_ipfw_rule_swap(ogs_ipfw_rule_t *ipfw_rule);
 
+#define OGS_MAX_NUM_OF_PACKET_FILTER_COMPONENT 16
+typedef struct ogs_pf_content_s {
+    uint8_t length;
+#define OGS_PACKET_FILTER_MATCH_ALL 1
+#define OGS_PACKET_FILTER_PROTOCOL_IDENTIFIER_NEXT_HEADER_TYPE 48
+#define OGS_PACKET_FILTER_IPV4_REMOTE_ADDRESS_TYPE 16
+#define OGS_PACKET_FILTER_IPV4_LOCAL_ADDRESS_TYPE 17
+#define OGS_PACKET_FILTER_IPV6_REMOTE_ADDRESS_TYPE 32
+#define OGS_PACKET_FILTER_IPV6_REMOTE_ADDRESS_PREFIX_LENGTH_TYPE 33
+#define OGS_PACKET_FILTER_IPV6_LOCAL_ADDRESS_TYPE 34
+#define OGS_PACKET_FILTER_IPV6_LOCAL_ADDRESS_PREFIX_LENGTH_TYPE 35
+#define OGS_PACKET_FILTER_SINGLE_LOCAL_PORT_TYPE 64
+#define OGS_PACKET_FILTER_LOCAL_PORT_RANGE_TYPE 65
+#define OGS_PACKET_FILTER_SINGLE_REMOTE_PORT_TYPE 80
+#define OGS_PACKET_FILTER_REMOTE_PORT_RANGE_TYPE 81
+#define OGS_PACKET_FILTER_SECURITY_PARAMETER_INDEX_TYPE 96
+#define OGS_PACKET_FILTER_TOS_TRAFFIC_CLASS_TYPE 112
+#define OGS_PACKET_FILTER_FLOW_LABEL_TYPE 128
+/* Ethernet packet filter component types (TS 24.501 R17 §9.11.4.13, Table
+ * 9.11.4.13.1). Used for TSN streams on Ethernet PDU sessions so the UE/UPF
+ * classify by L2 identity rather than an IP 5-tuple. */
+#define OGS_PACKET_FILTER_DESTINATION_MAC_ADDRESS_TYPE 0x81 /* 6 octets */
+#define OGS_PACKET_FILTER_SOURCE_MAC_ADDRESS_TYPE      0x82 /* 6 octets */
+#define OGS_PACKET_FILTER_8021Q_C_TAG_VID_TYPE         0x83 /* 2 octets, 12-bit VID */
+#define OGS_PACKET_FILTER_8021Q_C_TAG_PCP_DEI_TYPE     0x85 /* 1 octet, PCP/DEI */
+#define OGS_PACKET_FILTER_ETHERTYPE_TYPE               0x87 /* 2 octets */
+    struct {
+        uint8_t type;
+        union {
+            uint8_t proto;
+            struct {
+                uint32_t addr;
+                uint32_t mask;
+            } ipv4;
+            struct {
+                uint32_t addr[4];
+                uint8_t prefixlen;
+            } ipv6;
+            struct {
+                uint32_t addr[4];
+                uint32_t mask[4];
+            } ipv6_mask;
+            struct {
+                uint16_t low;
+                uint16_t high;
+            } port;
+            /* Ethernet (TS 24.501 §9.11.4.13): dst/src MAC, C-TAG VID, PCP/DEI,
+             * EtherType. VID/ethertype stored host-order; serialized big-endian. */
+            uint8_t mac[6];
+            uint16_t vid;
+            uint8_t pcp_dei;
+            uint16_t ethertype;
+        };
+    } component[OGS_MAX_NUM_OF_PACKET_FILTER_COMPONENT];
+    uint8_t num_of_component;
+} ogs_pf_content_t;
+
 void ogs_pf_content_from_ipfw_rule(
         uint8_t direction, ogs_pf_content_t *content, ogs_ipfw_rule_t *rule,
         bool no_ipv4v6_local_addr_in_packet_filter);
 
-/* Populate ogs_pf_content_t from structured Ethernet filter fields
- * (TS 24.501 §9.11.4.13). NULL or "-" field strings mean absent. */
-void ogs_pf_content_from_eth_fields(
-        const char *dst_mac, const char *src_mac,
-        const char *vid_str, const char *pcp_str, const char *eth_type,
-        ogs_pf_content_t *content);
+/* Parse the TSN Ethernet packet-filter sentinel string into an ogs_pf_content_t
+ * (TS 24.501 §9.11.4.13). Sentinel format:
+ *   "eth|<dstMAC>|<srcMAC>|<vid>|<pcp>|<ethertypeHex>"  ("-" = absent field).
+ * Shared by the SMF (NAS QoS-rule encode) and the UPF (DL frame classify). */
+void ogs_pf_content_from_eth_sentinel(
+        const char *desc, ogs_pf_content_t *content);
 
 #ifdef __cplusplus
 }

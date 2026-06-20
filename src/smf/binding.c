@@ -25,6 +25,23 @@
 
 #include "ipfw/ipfw2.h"
 
+/*
+ * build_eth_pf_content - parse the PCF sentinel string and populate an
+ * ogs_pf_content_t with Ethernet packet filter components.
+ *
+ * Sentinel format (TS 24.501 §9.11.4.13):
+ *   "eth|<dstMAC>|<srcMAC>|<vid>|<pcp>|<ethertypeHex>"
+ * Each field is "-" when absent. MACs accept ':' or '-' as octet separator.
+ * vid and ethertype are stored host-order; the NAS encoder byte-swaps them.
+ * pcp_dei is stored as (pcp << 1) with DEI=0; UE compares the low nibble.
+ */
+static void build_eth_pf_content(const char *desc, ogs_pf_content_t *content)
+{
+    /* Parsing moved to lib/ipfw so the UPF DL classifier shares the exact same
+     * sentinel decode (TS 24.501 §9.11.4.13). */
+    ogs_pf_content_from_eth_sentinel(desc, content);
+}
+
 static void gtp_bearer_timeout(ogs_gtp_xact_t *xact, void *data)
 {
     smf_bearer_t *bearer = NULL;
@@ -273,7 +290,7 @@ void smf_bearer_binding(smf_sess_t *sess)
                     ogs_error("No Flow");
                     return;
                 }
-                if (!flow->is_eth && !flow->description) {
+                if (!flow->description) {
                     ogs_error("No Flow-Description");
                     return;
                 }
@@ -282,7 +299,7 @@ void smf_bearer_binding(smf_sess_t *sess)
                  * To add a flow to an existing tft.
                  * duplicated flows are not added
                  */
-                if (!flow->is_eth && smf_pf_find_by_flow(
+                if (smf_pf_find_by_flow(
                     bearer, flow->direction, flow->description) != NULL) {
                     continue;
                 }
@@ -301,17 +318,16 @@ void smf_bearer_binding(smf_sess_t *sess)
                 }
 
                 pf->direction = flow->direction;
+                pf->flow_description = ogs_strdup(flow->description);
+                ogs_assert(pf->flow_description);
 
-                if (flow->is_eth) {
+                /* TSN Ethernet sentinel: skip IP-only compile/swap/check */
+                if (strncmp(pf->flow_description, "eth|", 4) == 0) {
+                    build_eth_pf_content(pf->flow_description, &pf->eth_content);
                     pf->is_eth = true;
-                    pf->eth_content = flow->eth_content;
-                    pf->flow_description = NULL;
                     ogs_list_add(&bearer->pf_to_add_list, &pf->to_add_node);
                     continue;
                 }
-
-                pf->flow_description = ogs_strdup(flow->description);
-                ogs_assert(pf->flow_description);
 
                 rv = ogs_ipfw_compile_rule(
                         &pf->ipfw_rule, pf->flow_description);
@@ -606,16 +622,16 @@ void smf_qos_flow_binding(smf_sess_t *sess)
 
                 memcpy(&qos_flow->qos, &pcc_rule->qos, sizeof(ogs_qos_t));
 
-                /* Bind the SMF-local TSC context to the TSC flow's QFI. One
-                 * TSC context per session, so the first QoS flow created for a
-                 * TSC-assisted session carries the binding; multi-flow-per-
-                 * session TSC is out of scope. */
+                /* Phase 6 Step 2: bind the SMF-local TSC context to the TSC
+                 * flow's QFI. One TSC context per session (Step-1 model), so
+                 * the first QoS flow created for a TSC-assisted session carries
+                 * the binding; multi-flow-per-session TSC is out of scope. */
                 if (sess->tsc && sess->tsc->qfi == 0)
                     sess->tsc->qfi = qos_flow->qfi;
 
-                /* A TSC-assisted flow that is not ACTIVE runs on its baseline
-                 * 5QI (the NGAP TSC IE is omitted) — record it so the fallback
-                 * success path is visible at the binding stage. */
+                /* Phase 6 Step 4: a TSC-assisted flow that is not ACTIVE runs on
+                 * its baseline 5QI (the NGAP TSC IE is omitted) — record it so
+                 * the fallback success path is visible at the binding stage. */
                 if (sess->tsc && sess->tsc->qfi == qos_flow->qfi &&
                         sess->tsc->status != TSC_STATUS_ACTIVE)
                     ogs_info("[SMF] QoS flow QFI[%d] on baseline 5QI "
@@ -676,7 +692,7 @@ void smf_qos_flow_binding(smf_sess_t *sess)
                     ogs_error("No Flow");
                     return;
                 }
-                if (!flow->is_eth && !flow->description) {
+                if (!flow->description) {
                     ogs_error("No Flow-Description");
                     return;
                 }
@@ -685,7 +701,7 @@ void smf_qos_flow_binding(smf_sess_t *sess)
                  * To add a flow to an existing tft.
                  * duplicated flows are not added
                  */
-                if (!flow->is_eth && smf_pf_find_by_flow(
+                if (smf_pf_find_by_flow(
                     qos_flow, flow->direction, flow->description) != NULL) {
                     continue;
                 }
@@ -704,17 +720,16 @@ void smf_qos_flow_binding(smf_sess_t *sess)
                 }
 
                 pf->direction = flow->direction;
+                pf->flow_description = ogs_strdup(flow->description);
+                ogs_assert(pf->flow_description);
 
-                if (flow->is_eth) {
+                /* TSN Ethernet sentinel: skip IP-only compile/swap/check */
+                if (strncmp(pf->flow_description, "eth|", 4) == 0) {
+                    build_eth_pf_content(pf->flow_description, &pf->eth_content);
                     pf->is_eth = true;
-                    pf->eth_content = flow->eth_content;
-                    pf->flow_description = NULL;
                     ogs_list_add(&qos_flow->pf_to_add_list, &pf->to_add_node);
                     continue;
                 }
-
-                pf->flow_description = ogs_strdup(flow->description);
-                ogs_assert(pf->flow_description);
 
                 rv = ogs_ipfw_compile_rule(
                         &pf->ipfw_rule, pf->flow_description);

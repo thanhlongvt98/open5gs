@@ -69,6 +69,8 @@ typedef struct OpenAPI_pcc_rule_s {
     int dis_ue_notif;
     bool is_pack_filt_all_prec;
     int pack_filt_all_prec;
+    bool is_max_data_burst_vol;
+    int max_data_burst_vol;
 } OpenAPI_pcc_rule_t;
 
 OpenAPI_pcc_rule_t *OpenAPI_pcc_rule_create(
@@ -116,7 +118,9 @@ OpenAPI_pcc_rule_t *OpenAPI_pcc_rule_create(
     bool is_dis_ue_notif,
     int dis_ue_notif,
     bool is_pack_filt_all_prec,
-    int pack_filt_all_prec
+    int pack_filt_all_prec,
+    bool is_max_data_burst_vol,
+    int max_data_burst_vol
 );
 void OpenAPI_pcc_rule_free(OpenAPI_pcc_rule_t *pcc_rule);
 OpenAPI_pcc_rule_t *OpenAPI_pcc_rule_parseFromJSON(cJSON *pcc_ruleJSON);

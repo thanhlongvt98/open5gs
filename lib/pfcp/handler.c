@@ -544,14 +544,6 @@ ogs_pfcp_pdr_t *ogs_pfcp_handle_create_pdr(ogs_pfcp_sess_t *sess,
 
     ogs_pfcp_rule_remove_all(pdr);
 
-    if (message->pdi.ethernet_packet_filter.presence) {
-        ogs_pfcp_rule_t *rule = ogs_pfcp_rule_add(pdr);
-        ogs_assert(rule);
-        ogs_pfcp_parse_ethernet_packet_filter(
-                &rule->eth_content, &message->pdi.ethernet_packet_filter);
-        rule->is_eth = true;
-    }
-
     for (i = 0; i < ogs_min(OGS_ARRAY_SIZE(message->pdi.sdf_filter),
                 OGS_MAX_NUM_OF_FLOW_IN_PDR); i++) {
         ogs_pfcp_sdf_filter_t sdf_filter;
@@ -624,13 +616,24 @@ ogs_pfcp_pdr_t *ogs_pfcp_handle_create_pdr(ogs_pfcp_sess_t *sess,
                     sdf_filter.flow_description,
                     sdf_filter.flow_description_len+1);
 
-            rv = ogs_ipfw_compile_rule(&rule->ipfw, flow_description);
-            if (rv != OGS_OK) {
-                ogs_error("ogs_ipfw_compile_rule() failed [%s]",
-                        flow_description);
-                ogs_free(flow_description);
-                ogs_pfcp_rule_remove(rule);
-                continue;
+            /* TSN Ethernet packet filter sentinel (TS 24.501 §9.11.4.13): not
+             * an IPFW "permit" rule. Parse it into rule->eth_content so the UPF
+             * DL classifier (upf_eth_dl_forward) can match frames by L2 identity
+             * (dst MAC / VID / PCP / EtherType) and steer the TSN stream onto
+             * its dedicated QoS flow. rule->ipfw is left zeroed (no IP match). */
+            if (strncmp(flow_description, "eth|", 4) == 0) {
+                ogs_pf_content_from_eth_sentinel(
+                        flow_description, &rule->eth_content);
+                rule->is_eth = true;
+            } else {
+                rv = ogs_ipfw_compile_rule(&rule->ipfw, flow_description);
+                if (rv != OGS_OK) {
+                    ogs_error("ogs_ipfw_compile_rule() failed [%s]",
+                            flow_description);
+                    ogs_free(flow_description);
+                    ogs_pfcp_rule_remove(rule);
+                    continue;
+                }
             }
 
             ogs_free(flow_description);
@@ -954,14 +957,6 @@ ogs_pfcp_pdr_t *ogs_pfcp_handle_update_pdr(ogs_pfcp_sess_t *sess,
 
         ogs_pfcp_rule_remove_all(pdr);
 
-        if (message->pdi.ethernet_packet_filter.presence) {
-            ogs_pfcp_rule_t *rule = ogs_pfcp_rule_add(pdr);
-            ogs_assert(rule);
-            ogs_pfcp_parse_ethernet_packet_filter(
-                    &rule->eth_content, &message->pdi.ethernet_packet_filter);
-            rule->is_eth = true;
-        }
-
         for (i = 0; i < ogs_min(OGS_ARRAY_SIZE(message->pdi.sdf_filter),
                     OGS_MAX_NUM_OF_FLOW_IN_PDR); i++) {
             ogs_pfcp_sdf_filter_t sdf_filter;
@@ -1033,13 +1028,19 @@ ogs_pfcp_pdr_t *ogs_pfcp_handle_update_pdr(ogs_pfcp_sess_t *sess,
                 /* TSN Ethernet packet filter sentinel (TS 24.501 §9.11.4.13):
                  * not an IPFW rule. Parse into rule->eth_content for the UPF
                  * DL L2 classifier; leave rule->ipfw zeroed (no IP match). */
-                rv = ogs_ipfw_compile_rule(&rule->ipfw, flow_description);
-                if (rv != OGS_OK) {
-                    ogs_error("ogs_ipfw_compile_rule() failed [%s]",
-                            flow_description);
-                    ogs_free(flow_description);
-                    ogs_pfcp_rule_remove(rule);
-                    continue;
+                if (strncmp(flow_description, "eth|", 4) == 0) {
+                    ogs_pf_content_from_eth_sentinel(
+                            flow_description, &rule->eth_content);
+                    rule->is_eth = true;
+                } else {
+                    rv = ogs_ipfw_compile_rule(&rule->ipfw, flow_description);
+                    if (rv != OGS_OK) {
+                        ogs_error("ogs_ipfw_compile_rule() failed [%s]",
+                                flow_description);
+                        ogs_free(flow_description);
+                        ogs_pfcp_rule_remove(rule);
+                        continue;
+                    }
                 }
 
                 ogs_free(flow_description);

@@ -408,9 +408,18 @@ static void _gtpv1_tun_recv_common_cb(
                         return; /* recvbuf consumed by ogs_pfcp_up_handle_pdr() */
                     goto cleanup;
                 }
-                /* dst-MAC not matched by any eth filter: flood per bridge behaviour. */
+                /* Ethernet PDU session SDF = Ethernet packet filters,
+                 * TS 23.501 / TS 29.244 eth SDF — do not run eth frames through
+                 * the IP matcher.
+                 *
+                 * If the dst-MAC is not yet in the UPF session table (MAC not yet
+                 * learned from UL traffic), flood the frame to all Ethernet PDU
+                 * sessions following IEEE 802.1Q bridge unknown-unicast behaviour.
+                 * This avoids the frame falling through to upf_sess_find_by_ue_ip_
+                 * address(), which treats the raw Ethernet frame as an IP packet and
+                 * errors on the MAC bytes ("IP version:10"). */
                 if (upf_eth_dl_flood(recvbuf))
-                    goto cleanup;
+                    goto cleanup; /* forwarded to all eth sessions; free original */
             } else {
                 if (upf_eth_dl_flood(recvbuf))
                     goto cleanup; /* copies forwarded; free the original */

@@ -28,8 +28,6 @@
 extern "C" {
 #endif /* __cplusplus */
 
-#include "ogs-pf-content.h"
-
 #define OGS_MAX_NUM_OF_SESS             4   /* Num of APN(Session) per UE */
 #define OGS_MAX_NUM_OF_BEARER           4   /* Num of Bearer per Session */
 #define OGS_BEARER_PER_UE               8   /* Num of Bearer per UE */
@@ -574,19 +572,15 @@ int ogs_check_qos_conf(ogs_qos_t *qos);
 #define OGS_FLOW_BIDIRECTIONAL    3
 typedef struct ogs_flow_s {
     uint8_t direction;
-    char *description;  /* NULL when is_eth */
-    bool is_eth;
-    ogs_pf_content_t eth_content;
+    char *description;
 } ogs_flow_t;
 
 #define OGS_FLOW_FREE(__fLOW) \
     do { \
-        if ((__fLOW)->is_eth) { \
-            memset(&((__fLOW)->eth_content), 0, \
-                    sizeof((__fLOW)->eth_content)); \
-        } else if ((__fLOW)->description) { \
+        if ((__fLOW)->description) { \
             ogs_free((__fLOW)->description); \
-        } else \
+        } \
+        else \
             ogs_assert_if_reached(); \
     } while(0)
 
@@ -654,17 +648,9 @@ typedef struct ogs_pcc_rule_s {
         for (__iNDEX = 0; __iNDEX < (__sRC)->num_of_flow; __iNDEX++) { \
             (__dST)->flow[__iNDEX].direction = \
                 (__sRC)->flow[__iNDEX].direction; \
-            (__dST)->flow[__iNDEX].is_eth = \
-                (__sRC)->flow[__iNDEX].is_eth; \
-            if ((__sRC)->flow[__iNDEX].is_eth) { \
-                (__dST)->flow[__iNDEX].description = NULL; \
-                (__dST)->flow[__iNDEX].eth_content = \
-                    (__sRC)->flow[__iNDEX].eth_content; \
-            } else { \
-                (__dST)->flow[__iNDEX].description = \
-                    ogs_strdup((__sRC)->flow[__iNDEX].description);  \
-                ogs_assert((__dST)->flow[__iNDEX].description); \
-            } \
+            (__dST)->flow[__iNDEX].description = \
+                ogs_strdup((__sRC)->flow[__iNDEX].description);  \
+            ogs_assert((__dST)->flow[__iNDEX].description); \
         } \
         (__dST)->num_of_flow = (__sRC)->num_of_flow; \
         (__dST)->flow_status = (__sRC)->flow_status; \
