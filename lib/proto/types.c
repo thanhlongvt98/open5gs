@@ -1046,7 +1046,15 @@ static int flow_rx_to_gx(ogs_flow_t *rx_flow, ogs_flow_t *gx_flow)
         return OGS_ERROR;
     }
 
-    if (!strncmp(rx_flow->description,
+    /* TSN Ethernet flow (TS 24.501 §9.11.4.13): structured L2 filter — preserve
+     * direction and copy eth_content through to the PCC rule. */
+    if (rx_flow->is_eth) {
+        gx_flow->direction = rx_flow->direction;
+        gx_flow->is_eth = true;
+        gx_flow->description = NULL;
+        gx_flow->eth_content = rx_flow->eth_content;
+
+    } else if (!strncmp(rx_flow->description,
                 "permit out", strlen("permit out"))) {
         gx_flow->direction = OGS_FLOW_DOWNLINK_ONLY;
         gx_flow->description = ogs_strdup(rx_flow->description);
@@ -1224,6 +1232,10 @@ int ogs_pcc_rule_update_qos_from_media(
 
     for (i = 0; i < media_component->num_of_sub; i++) {
         ogs_media_sub_component_t *sub = &media_component->sub[i];
+        /* Guard against double-counting: for TSN Ethernet sub-components the
+         * PCF appends both the real data EthFlowDescription AND a gPTP
+         * catch-all flow (ethType 88F7), both BIDIRECTIONAL. */
+        bool bidir_counted = false;
 
         for (j = 0; j < sub->num_of_flow &&
                     j < OGS_MAX_NUM_OF_FLOW_IN_MEDIA_SUB_COMPONENT; j++) {
@@ -1310,6 +1322,34 @@ int ogs_pcc_rule_update_qos_from_media(
                             media_component->min_requested_bandwidth_ul;
                     }
                 }
+            } else if (gx_flow.direction == OGS_FLOW_BIDIRECTIONAL) {
+                /* TSN Ethernet flow (TS 24.501 §9.11.4.13) is bidirectional:
+                 * add both DL and UL GBR/MBR from the medComponent (for TSC,
+                 * the AF sets GBR == MBR and DL == UL).
+                 *
+                 * Only the FIRST BIDIRECTIONAL flow in this sub-component may
+                 * accumulate bandwidth.  The TSN AF adds both the real data
+                 * EthFlowDescription and a gPTP catch-all flow
+                 * (ethType 88F7) to the same sub, both BIDIRECTIONAL.
+                 * Running the four += lines for every BIDIRECTIONAL flow would
+                 * double (or more) the media-component bandwidth on each
+                 * iteration.  The IMS "one flow sets the QoS" semantics apply:
+                 * once bidir_counted is true the extra flows are parsed (for
+                 * packet-filter purposes) but must not add bandwidth again.
+                 * Assumes the real data EthFlowDescription precedes any
+                 * catch-all flow in the sub-component, which matches current
+                 * TSN AF ordering. */
+                if ((gx_flow.is_eth || gx_flow.description) && !bidir_counted) {
+                    pcc_rule->qos.mbr.downlink +=
+                        media_component->max_requested_bandwidth_dl;
+                    pcc_rule->qos.gbr.downlink +=
+                        media_component->min_requested_bandwidth_dl;
+                    pcc_rule->qos.mbr.uplink +=
+                        media_component->max_requested_bandwidth_ul;
+                    pcc_rule->qos.gbr.uplink +=
+                        media_component->min_requested_bandwidth_ul;
+                    bidir_counted = true;
+                }
             } else
                 ogs_assert_if_reached();
 
@@ -1335,6 +1375,20 @@ int ogs_pcc_rule_update_qos_from_media(
         pcc_rule->qos.gbr.downlink = pcc_rule->qos.mbr.downlink;
     if (pcc_rule->qos.gbr.uplink == 0)
         pcc_rule->qos.gbr.uplink = pcc_rule->qos.mbr.uplink;
+
+    /* Carry TSCAI assistance from the media component onto the PCC
+     * rule, so it is emitted on the SmPolicyDecision toward the SMF. */
+    pcc_rule->tscai_input_dl = media_component->tscai_input_dl;
+    pcc_rule->tscai_input_ul = media_component->tscai_input_ul;
+
+    /* Carry the PCF-assigned 5QI for the TSC flow onto the PCC rule QoS. The PCF
+     * selects a standardized delay-critical-GBR 5QI (is_dynamic=false) so the SMF
+     * emits a NonDynamic5QIDescriptor; the TSCAI is carried separately. (When
+     * is_dynamic is set instead, the same field carries the dynamic 5QI value and
+     * the characteristics travel in qosChars, TS 29.512 §4.2.6.6.3.) */
+    pcc_rule->qos.dyn_5qi = media_component->dyn_5qi;
+    if (pcc_rule->qos.dyn_5qi.five_qi)
+        pcc_rule->qos.index = pcc_rule->qos.dyn_5qi.five_qi;
 
     return OGS_OK;
 }

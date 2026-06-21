@@ -72,9 +72,12 @@ libsmf_sources = files('''
     metrics.h
     pdu-info.h
 
+    tsc_context.h
+
     init.c
     event.c
     timer.c
+    tsc_context.c
     context.c
     smf-sm.c
     gsm-sm.c

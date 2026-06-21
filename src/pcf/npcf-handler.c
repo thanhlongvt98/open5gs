@@ -18,6 +18,7 @@
  */
 
 #include "sbi-path.h"
+#include "ipfw/ogs-ipfw.h"
 
 #include "npcf-handler.h"
 
@@ -48,6 +49,9 @@ static uint8_t pcf_qos_index_from_media(
         return OGS_QOS_INDEX_2;
     case OpenAPI_media_type_CONTROL:
         return OGS_QOS_INDEX_5;
+    case OpenAPI_media_type_DATA:
+        /* TSN/Ethernet flows use medType DATA (TS 29.514 §5.6.2.7). */
+        return OGS_QOS_INDEX_1;
     case OpenAPI_media_type_NULL:
         *err_out = "Media-Type is Required";
         return 0;
@@ -318,7 +322,12 @@ bool pcf_npcf_smpolicycontrol_handle_create(pcf_sess_t *sess,
         goto cleanup;
     }
 
-    if (!SmPolicyContextData->ipv4_address &&
+    /* an Ethernet PDU session (TS 23.501 §5.6.10) carries no UE
+     * IP — the SM Policy Association is keyed by SUPI/DNN/MAC, not an address.
+     * Only require an IPv4/IPv6 address for IP PDU session types. */
+    if (SmPolicyContextData->pdu_session_type !=
+                OpenAPI_pdu_session_type_ETHERNET &&
+        !SmPolicyContextData->ipv4_address &&
         !SmPolicyContextData->ipv6_address_prefix) {
         strerror = ogs_msprintf("[%s:%d] No IPv4 address or IPv6 prefix",
                 pcf_ue_sm->supi, sess->psi);
@@ -654,6 +663,101 @@ cleanup:
     return false;
 }
 
+/* Map the AF's TsnQosContainer (TS 29.514 §5.6.2.35) to a standardized
+ * delay-critical-GBR 5QI (PCF QoS mapping, TS 23.501 §5.28.4 / §5.27.3 point 5).
+ * The PCF mapping table maps the TSN QoS information (priority / PDB / TSC burst
+ * size) to the 5GS QoS profile: the selected 5QI's standardized characteristics
+ * (Table 5.7.4-1) must satisfy the requirement — MDBV >= burst (§5.27.3 point 1),
+ * PDB <= requested (point 2), priority matching the traffic class.
+ *
+ * The TSC traffic pattern (TSCAI) is signalled SEPARATELY and comes from the CNC
+ * (tscaiInput) — it is NOT derived from the 5QI's table values, so each stream
+ * keeps its CNC-computed periodicity/burst-arrival/survival. Here the PCF only
+ * selects the QoS-flow 5QI. */
+static void pcf_map_tsn_qos_to_5qi(ogs_dyn_5qi_t *dyn,
+        bool has_pdb, int pack_delay,
+        bool has_burst, int burst_size)
+{
+    const size_t n = OGS_ARRAY_SIZE(pcf_tsc_5qi_table);
+    int sel = -1;
+    bool sel_exact = false;
+    uint16_t sel_pdb = 0, sel_mdbv = 0;
+    size_t i;
+
+    /* TS 29.514 fields are unsigned; ignore malformed negative AF values rather
+     * than letting (uint16_t) cast wrap into bogus PDB/MDBV checks. */
+    if (has_pdb && pack_delay < 0)
+        has_pdb = false;
+    if (has_burst && burst_size < 0)
+        has_burst = false;
+
+    /* The AF's tscPrioLevel is intentionally ignored for 5QI selection: it encodes
+     * 8 − PCP (range 1..8), which cannot match the standardized Priority Levels
+     * (18..24, Table 5.7.4-1), so it is not passed here (TS 23.501 §5.7.3.3).
+     * Within the DC-GBR set the pair (PDB, MDBV) uniquely identifies each 5QI;
+     * selection keys on PDB (from tscPackDelay) + MDBV (>= the TSC burst). */
+
+    /* Standardized 5QI -> NGAP NonDynamic5QIDescriptor (dynamic path stays off).
+     * Ob.4 deferred: do not store or signal true-burst MDBV on dyn_5qi — the gNB
+     * uses the selected NonDynamic 5QI's standardized MDBV (TS 23.501 §5.7.3.7).
+     * Selection below keys only on the burst_size argument (maxDataBurstVol). */
+    dyn->is_dynamic = false;
+    dyn->delay_critical = true;
+
+    /* Pick the best satisfying row in one pass, ranked:
+     *   1. exact PDB match (pdb == requested) beats a merely-satisfying one — lets a
+     *      stream land deterministically on its intended tier (TS 23.501 §5.27.3 pt2);
+     *   2. else the tightest PDB that still meets the requirement (pdb <= requested);
+     *   3. within equal rank, the smallest MDBV that still covers the burst
+     *      (MDBV >= burst, §5.27.3 pt1) — so a small burst picks the 255 B row and a
+     *      large one the 1354 B row of the same PDB tier.
+     * A row that fails the PDB/MDBV requirement is skipped; if none qualifies the
+     * default (85) stands. */
+    for (i = 0; i < n; i++) {
+        uint16_t pdb = pcf_tsc_5qi_table[i].pdb_ms;
+        uint16_t mdbv = pcf_tsc_5qi_table[i].mdbv;
+        bool exact;
+
+        if (has_pdb && pdb > (uint16_t)pack_delay)
+            continue;                                 /* PDB must be met */
+        if (has_burst && mdbv < (uint16_t)burst_size)
+            continue;                                 /* MDBV must cover the burst */
+
+        exact = has_pdb && (pdb == (uint16_t)pack_delay);
+
+        if (sel < 0 ||
+                (exact && !sel_exact) ||
+                (exact == sel_exact && pdb < sel_pdb) ||
+                (exact == sel_exact && pdb == sel_pdb && mdbv < sel_mdbv)) {
+            sel = (int)i;
+            sel_exact = exact;
+            sel_pdb = pdb;
+            sel_mdbv = mdbv;
+        }
+    }
+
+    if (sel < 0) {
+        dyn->five_qi = PCF_TSC_5QI_DEFAULT;
+        ogs_info("[PCF] TSN QoS -> 5QI: no DC-GBR row satisfies "
+                 "(pdb%s%d ms, burst%s%d B) -> default 5QI[%d]",
+                 has_pdb ? "=" : "?", has_pdb ? pack_delay : 0,
+                 has_burst ? "=" : "?", has_burst ? burst_size : 0,
+                 PCF_TSC_5QI_DEFAULT);
+        return;
+    }
+
+    dyn->five_qi = pcf_tsc_5qi_table[sel].five_qi;
+    ogs_info("[PCF] TSN QoS -> 5QI[%d]: req(pdb%s%d ms, burst%s%d B) matched "
+             "prio[%d] pdb[%d ms] per[%dE-%d] mdbv[%d B] avgWin[%d ms] cnPdb[%d ms]",
+             pcf_tsc_5qi_table[sel].five_qi,
+             has_pdb ? "=" : "?", has_pdb ? pack_delay : 0,
+             has_burst ? "=" : "?", has_burst ? burst_size : 0,
+             pcf_tsc_5qi_table[sel].priority, pcf_tsc_5qi_table[sel].pdb_ms,
+             pcf_tsc_5qi_table[sel].per_scalar, pcf_tsc_5qi_table[sel].per_exponent,
+             pcf_tsc_5qi_table[sel].mdbv, pcf_tsc_5qi_table[sel].avg_window_ms,
+             pcf_tsc_5qi_table[sel].cn_pdb_ms);
+}
+
 bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
         ogs_sbi_stream_t *stream, ogs_sbi_message_t *recvmsg)
 {
@@ -705,6 +809,9 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
     OpenAPI_list_t *QosDecisionList = NULL;
     OpenAPI_map_t *QosDecisionMap = NULL;
     OpenAPI_qos_data_t *QosData = NULL;
+    OpenAPI_list_t *QosCharsList = NULL;
+    OpenAPI_map_t *QosCharsMap = NULL;
+    OpenAPI_qos_characteristics_t *QosChars = NULL;
 
     OpenAPI_lnode_t *node = NULL, *node2 = NULL, *node3 = NULL;
 
@@ -749,8 +856,18 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
         goto cleanup;
     }
 
-    if (!AscReqData->med_components) {
-        strerror = ogs_msprintf("[%s:%d] No AscReqData->MediaCompoenent",
+    /* medComponents is OPTIONAL in TS 29.514 (§4.2.2.2: provided "if available";
+     * the PCF acts only "if the request contains the medComponents attribute"). A
+     * bridge-management app-session that carries ONLY a Port Management Container
+     * (tsnPortManContDstt/Nwtts) and no media is valid: it authorizes the 802.1Qbv
+     * gate schedule (PMIC) without requesting any QoS flow. Reject only when there is
+     * neither media nor a PMIC (nothing to authorize). This also avoids forcing a
+     * QoS-flow add (PCC rule) onto a TSN session whose flow is subscriber-provisioned. */
+    if (!AscReqData->med_components &&
+            !AscReqData->tsn_port_man_cont_dstt &&
+            (!AscReqData->tsn_port_man_cont_nwtts ||
+             !AscReqData->tsn_port_man_cont_nwtts->first)) {
+        strerror = ogs_msprintf("[%s:%d] No AscReqData media components or PMIC",
                 pcf_ue_sm->supi, sess->psi);
         status = OGS_SBI_HTTP_STATUS_BAD_REQUEST;
         goto cleanup;
@@ -819,6 +936,57 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
                         ogs_sbi_bitrate_from_string(MediaComponent->rs_bw);
                 media_component->flow_status = MediaComponent->f_status;
 
+                /* capture the AF's TSCAI input containers (TS 29.514)
+                 * into the internal media component so they are carried onto
+                 * the PCC rule and emitted toward the SMF on the
+                 * SmPolicyDecision. */
+                if (MediaComponent->tscai_input_dl &&
+                        !MediaComponent->is_tscai_input_dl_null) {
+                    OpenAPI_tscai_input_container_t *Tin =
+                        MediaComponent->tscai_input_dl;
+                    ogs_tscai_input_t *tdl = &media_component->tscai_input_dl;
+                    tdl->present = true;
+                    tdl->is_periodicity = Tin->is_periodicity;
+                    tdl->periodicity = Tin->periodicity;
+                    if (Tin->burst_arrival_time)
+                        ogs_cpystrn(tdl->burst_arrival_time,
+                                Tin->burst_arrival_time, OGS_TSCAI_BAT_STR_LEN);
+                    tdl->is_sur_time_in_num_msg = Tin->is_sur_time_in_num_msg;
+                    tdl->sur_time_in_num_msg = Tin->sur_time_in_num_msg;
+                    tdl->is_sur_time_in_time = Tin->is_sur_time_in_time;
+                    tdl->sur_time_in_time = Tin->sur_time_in_time;
+                }
+                if (MediaComponent->tscai_input_ul &&
+                        !MediaComponent->is_tscai_input_ul_null) {
+                    OpenAPI_tscai_input_container_t *Tin =
+                        MediaComponent->tscai_input_ul;
+                    ogs_tscai_input_t *tul = &media_component->tscai_input_ul;
+                    tul->present = true;
+                    tul->is_periodicity = Tin->is_periodicity;
+                    tul->periodicity = Tin->periodicity;
+                    if (Tin->burst_arrival_time)
+                        ogs_cpystrn(tul->burst_arrival_time,
+                                Tin->burst_arrival_time, OGS_TSCAI_BAT_STR_LEN);
+                    tul->is_sur_time_in_num_msg = Tin->is_sur_time_in_num_msg;
+                    tul->sur_time_in_num_msg = Tin->sur_time_in_num_msg;
+                    tul->is_sur_time_in_time = Tin->is_sur_time_in_time;
+                    tul->sur_time_in_time = Tin->sur_time_in_time;
+                }
+
+                /* Map the AF's TsnQosContainer to a standardized delay-critical
+                 * GBR 5QI (TS 29.514 §5.6.2.35 -> TS 23.501 §5.28.4); the CNC-defined
+                 * TSCAI is carried separately (tscaiInput), unaffected by the 5QI. */
+                if (MediaComponent->tsn_qos)
+                    /* Selection keys on the TRUE per-period burst from the
+                     * MediaComponent (maxDataBurstVol), not the spec-floored
+                     * tsnQos.maxTscBurstSize (>=4096, TS 29.514 §5.6.2.35),
+                     * which would fail every MDBV-coverage check (TS 23.501 §5.7.3.7). */
+                    pcf_map_tsn_qos_to_5qi(&media_component->dyn_5qi,
+                            MediaComponent->tsn_qos->is_tsc_pack_delay,
+                            MediaComponent->tsn_qos->tsc_pack_delay,
+                            MediaComponent->is_max_data_burst_vol,
+                            MediaComponent->max_data_burst_vol);
+
                 SubComponentList = MediaComponent->med_sub_comps;
                 OpenAPI_list_for_each(SubComponentList, node2) {
                     if (media_component->num_of_sub >=
@@ -857,6 +1025,88 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
                                     flow->description = ogs_strdup(node3->data);
                                     ogs_assert(flow->description);
 
+                                    sub->num_of_flow++;
+                                }
+                            }
+
+                            /* TSN Ethernet PDU session: carry the real L2
+                             * stream filter (TS 29.514 EthFlowDescription)
+                             * as a structured ogs_flow (is_eth + eth_content) so
+                             * the SMF builds a proper Ethernet ogs_pf_content_t
+                             * (TS 24.501 §9.11.4.13) for the UE QoS rule.
+                             * A second flow for gPTP (EtherType 0x88F7) is
+                             * always added so gPTP sync packets are classified
+                             * onto this QoS flow. */
+                            if (sub->num_of_flow == 0 &&
+                                    SubComponent->ethf_descs &&
+                                    SubComponent->ethf_descs->count > 0) {
+                                OpenAPI_lnode_t *eth_node = NULL;
+                                OpenAPI_eth_flow_description_t *eth_desc = NULL;
+                                ogs_flow_t *flow = NULL;
+                                ogs_flow_t *flow2 = NULL;
+                                const char *dst_mac = "-";
+                                const char *src_mac = "-";
+                                char vid_str[8] = "-";
+                                char pcp_str[4] = "-";
+                                const char *eth_type = "-";
+
+                                eth_node = SubComponent->ethf_descs->first;
+                                if (eth_node)
+                                    eth_desc = eth_node->data;
+
+                                if (eth_desc) {
+                                    if (eth_desc->dest_mac_addr)
+                                        dst_mac = eth_desc->dest_mac_addr;
+                                    if (eth_desc->source_mac_addr)
+                                        src_mac = eth_desc->source_mac_addr;
+                                    if (eth_desc->eth_type)
+                                        eth_type = eth_desc->eth_type;
+                                    /* Decode first VLAN tag: 4-hex TCI string
+                                     * e.g. "A064" → PCP=5, VID=100 */
+                                    if (eth_desc->vlan_tags &&
+                                            eth_desc->vlan_tags->count > 0 &&
+                                            eth_desc->vlan_tags->first) {
+                                        const char *tag =
+                                            (const char *)
+                                            eth_desc->vlan_tags->first->data;
+                                        if (tag) {
+                                            long tci = strtol(tag, NULL, 16);
+                                            int vid = (int)(tci & 0x0FFF);
+                                            int pcp = (int)((tci >> 13) & 0x7);
+                                            ogs_snprintf(vid_str,
+                                                sizeof(vid_str), "%d", vid);
+                                            ogs_snprintf(pcp_str,
+                                                sizeof(pcp_str), "%d", pcp);
+                                        }
+                                    }
+                                }
+
+                                /* Primary flow: TSN stream L2 filter */
+                                if (sub->num_of_flow <
+                                        (int)OGS_ARRAY_SIZE(sub->flow)) {
+                                    flow = &sub->flow[sub->num_of_flow];
+                                    flow->is_eth = true;
+                                    flow->description = NULL;
+                                    ogs_pf_content_from_eth_fields(
+                                            dst_mac, src_mac,
+                                            vid_str, pcp_str, eth_type,
+                                            &flow->eth_content);
+                                    flow->direction = OGS_FLOW_BIDIRECTIONAL;
+                                    sub->num_of_flow++;
+                                    ogs_info("[PCF] EthFlowDescription -> "
+                                        "structured L2 filter (TSN stream)");
+                                }
+
+                                /* Secondary flow: gPTP (EtherType 0x88F7) */
+                                if (sub->num_of_flow <
+                                        (int)OGS_ARRAY_SIZE(sub->flow)) {
+                                    flow2 = &sub->flow[sub->num_of_flow];
+                                    flow2->is_eth = true;
+                                    flow2->description = NULL;
+                                    ogs_pf_content_from_eth_fields(
+                                            "-", "-", "-", "-", "88f7",
+                                            &flow2->eth_content);
+                                    flow2->direction = OGS_FLOW_BIDIRECTIONAL;
                                     sub->num_of_flow++;
                                 }
                             }
@@ -913,6 +1163,8 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
 
     QosDecisionList = OpenAPI_list_create();
     ogs_assert(QosDecisionList);
+    QosCharsList = OpenAPI_list_create();
+    ogs_assert(QosCharsList);
 
     for (i = 0; i < ims_data.num_of_media_component; i++) {
         int flow_presence = 0;
@@ -1070,6 +1322,17 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
         ogs_assert(QosDecisionMap);
 
         OpenAPI_list_add(QosDecisionList, QosDecisionMap);
+
+        /* For a dynamically-assigned 5QI, signal the authorized QoS
+         * characteristics in the SmPolicyDecision qosChars, keyed by the 5QI
+         * value (TS 29.512 §4.2.6.6.3). QosData->5qi references this entry. */
+        QosChars = ogs_sbi_build_qos_characteristics(pcc_rule);
+        if (QosChars) {
+            QosCharsMap = OpenAPI_map_create(
+                    ogs_msprintf("%d", QosChars->_5qi), QosChars);
+            ogs_assert(QosCharsMap);
+            OpenAPI_list_add(QosCharsList, QosCharsMap);
+        }
     }
 
     if (PccRuleList->count)
@@ -1077,6 +1340,9 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
 
     if (QosDecisionList->count)
         SmPolicyDecision.qos_decs = QosDecisionList;
+
+    if (QosCharsList->count)
+        SmPolicyDecision.qos_chars = QosCharsList;
 
     memset(&sendmsg, 0, sizeof(sendmsg));
 
@@ -1088,6 +1354,13 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
     sendmsg.http.location = ogs_sbi_server_uri(server, &header);
     ogs_assert(sendmsg.http.location);
 
+    /* forward the AF's per-port PMIC containers onto the
+     * SmPolicyDecision toward the SMF (TS 29.514 -> TS 29.512). Shallow copy —
+     * AscReqData outlives the update-notify send. */
+    SmPolicyDecision.tsn_port_man_cont_dstt = AscReqData->tsn_port_man_cont_dstt;
+    SmPolicyDecision.tsn_port_man_cont_nwtts =
+        AscReqData->tsn_port_man_cont_nwtts;
+
     sendmsg.AppSessionContext = recvmsg->AppSessionContext;
 
     response = ogs_sbi_build_response(&sendmsg, OGS_SBI_HTTP_STATUS_CREATED);
@@ -1096,7 +1369,13 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
 
     ogs_free(sendmsg.http.location);
 
-    if (PccRuleList->count || QosDecisionList->count) {
+    /* Also send the update-notify for a PMIC-only decision (no PCC rules / QoS
+     * decisions): a bridge-management app-session forwards the 802.1Qbv gate schedule
+     * (tsnPortManContDstt/Nwtts) to the SMF without requesting any QoS flow. */
+    if (PccRuleList->count || QosDecisionList->count ||
+            SmPolicyDecision.tsn_port_man_cont_dstt ||
+            (SmPolicyDecision.tsn_port_man_cont_nwtts &&
+             SmPolicyDecision.tsn_port_man_cont_nwtts->first)) {
         ogs_assert(true == pcf_sbi_send_smpolicycontrol_update_notify(
                                 sess, &SmPolicyDecision));
     }
@@ -1122,6 +1401,19 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
         }
     }
     OpenAPI_list_free(QosDecisionList);
+
+    OpenAPI_list_for_each(QosCharsList, node) {
+        QosCharsMap = node->data;
+        if (QosCharsMap) {
+            QosChars = QosCharsMap->value;
+            if (QosChars)
+                OpenAPI_qos_characteristics_free(QosChars);
+            if (QosCharsMap->key)
+                ogs_free(QosCharsMap->key);
+            ogs_free(QosCharsMap);
+        }
+    }
+    OpenAPI_list_free(QosCharsList);
 
     ogs_ims_data_free(&ims_data);
     OGS_SESSION_DATA_FREE(&session_data);
@@ -1165,6 +1457,19 @@ cleanup:
         }
     }
     OpenAPI_list_free(QosDecisionList);
+
+    OpenAPI_list_for_each(QosCharsList, node) {
+        QosCharsMap = node->data;
+        if (QosCharsMap) {
+            QosChars = QosCharsMap->value;
+            if (QosChars)
+                OpenAPI_qos_characteristics_free(QosChars);
+            if (QosCharsMap->key)
+                ogs_free(QosCharsMap->key);
+            ogs_free(QosCharsMap);
+        }
+    }
+    OpenAPI_list_free(QosCharsList);
 
     ogs_ims_data_free(&ims_data);
     OGS_SESSION_DATA_FREE(&session_data);
@@ -1216,6 +1521,9 @@ bool pcf_npcf_policyauthorization_handle_update(
     OpenAPI_list_t *QosDecisionList = NULL;
     OpenAPI_map_t *QosDecisionMap = NULL;
     OpenAPI_qos_data_t *QosData = NULL;
+    OpenAPI_list_t *QosCharsList = NULL;
+    OpenAPI_map_t *QosCharsMap = NULL;
+    OpenAPI_qos_characteristics_t *QosChars = NULL;
 
     OpenAPI_lnode_t *node = NULL, *node2 = NULL, *node3 = NULL;
 
@@ -1295,6 +1603,57 @@ bool pcf_npcf_policyauthorization_handle_update(
                         ogs_sbi_bitrate_from_string(MediaComponent->rs_bw);
                 media_component->flow_status = MediaComponent->f_status;
 
+                /* capture the AF's TSCAI input containers (TS 29.514)
+                 * into the internal media component so they are carried onto
+                 * the PCC rule and emitted toward the SMF on the
+                 * SmPolicyDecision. */
+                if (MediaComponent->tscai_input_dl &&
+                        !MediaComponent->is_tscai_input_dl_null) {
+                    OpenAPI_tscai_input_container_t *Tin =
+                        MediaComponent->tscai_input_dl;
+                    ogs_tscai_input_t *tdl = &media_component->tscai_input_dl;
+                    tdl->present = true;
+                    tdl->is_periodicity = Tin->is_periodicity;
+                    tdl->periodicity = Tin->periodicity;
+                    if (Tin->burst_arrival_time)
+                        ogs_cpystrn(tdl->burst_arrival_time,
+                                Tin->burst_arrival_time, OGS_TSCAI_BAT_STR_LEN);
+                    tdl->is_sur_time_in_num_msg = Tin->is_sur_time_in_num_msg;
+                    tdl->sur_time_in_num_msg = Tin->sur_time_in_num_msg;
+                    tdl->is_sur_time_in_time = Tin->is_sur_time_in_time;
+                    tdl->sur_time_in_time = Tin->sur_time_in_time;
+                }
+                if (MediaComponent->tscai_input_ul &&
+                        !MediaComponent->is_tscai_input_ul_null) {
+                    OpenAPI_tscai_input_container_t *Tin =
+                        MediaComponent->tscai_input_ul;
+                    ogs_tscai_input_t *tul = &media_component->tscai_input_ul;
+                    tul->present = true;
+                    tul->is_periodicity = Tin->is_periodicity;
+                    tul->periodicity = Tin->periodicity;
+                    if (Tin->burst_arrival_time)
+                        ogs_cpystrn(tul->burst_arrival_time,
+                                Tin->burst_arrival_time, OGS_TSCAI_BAT_STR_LEN);
+                    tul->is_sur_time_in_num_msg = Tin->is_sur_time_in_num_msg;
+                    tul->sur_time_in_num_msg = Tin->sur_time_in_num_msg;
+                    tul->is_sur_time_in_time = Tin->is_sur_time_in_time;
+                    tul->sur_time_in_time = Tin->sur_time_in_time;
+                }
+
+                /* Map the AF's TsnQosContainer to a standardized delay-critical
+                 * GBR 5QI (TS 29.514 §5.6.2.35 -> TS 23.501 §5.28.4); the CNC-defined
+                 * TSCAI is carried separately (tscaiInput), unaffected by the 5QI. */
+                if (MediaComponent->tsn_qos)
+                    /* Selection keys on the TRUE per-period burst from the
+                     * MediaComponent (maxDataBurstVol), not the spec-floored
+                     * tsnQos.maxTscBurstSize (>=4096, TS 29.514 §5.6.2.35),
+                     * which would fail every MDBV-coverage check (TS 23.501 §5.7.3.7). */
+                    pcf_map_tsn_qos_to_5qi(&media_component->dyn_5qi,
+                            MediaComponent->tsn_qos->is_tsc_pack_delay,
+                            MediaComponent->tsn_qos->tsc_pack_delay,
+                            MediaComponent->is_max_data_burst_vol,
+                            MediaComponent->max_data_burst_vol);
+
                 SubComponentList = MediaComponent->med_sub_comps;
                 OpenAPI_list_for_each(SubComponentList, node2) {
                     if (media_component->num_of_sub >=
@@ -1336,6 +1695,86 @@ bool pcf_npcf_policyauthorization_handle_update(
                                     sub->num_of_flow++;
                                 }
                             }
+
+                            /* TSN Ethernet PDU session: carry the real L2
+                             * stream filter (TS 29.514 EthFlowDescription)
+                             * as a structured ogs_flow (is_eth + eth_content) so
+                             * the SMF builds a proper Ethernet ogs_pf_content_t
+                             * (TS 24.501 §9.11.4.13) for the UE QoS rule.
+                             * A second flow for gPTP (EtherType 0x88F7) is
+                             * always added so gPTP sync packets are classified
+                             * onto this QoS flow. */
+                            if (sub->num_of_flow == 0 &&
+                                    SubComponent->ethf_descs &&
+                                    SubComponent->ethf_descs->count > 0) {
+                                OpenAPI_lnode_t *eth_node = NULL;
+                                OpenAPI_eth_flow_description_t *eth_desc = NULL;
+                                ogs_flow_t *flow = NULL;
+                                ogs_flow_t *flow2 = NULL;
+                                const char *dst_mac = "-";
+                                const char *src_mac = "-";
+                                char vid_str[8] = "-";
+                                char pcp_str[4] = "-";
+                                const char *eth_type = "-";
+
+                                eth_node = SubComponent->ethf_descs->first;
+                                if (eth_node)
+                                    eth_desc = eth_node->data;
+
+                                if (eth_desc) {
+                                    if (eth_desc->dest_mac_addr)
+                                        dst_mac = eth_desc->dest_mac_addr;
+                                    if (eth_desc->source_mac_addr)
+                                        src_mac = eth_desc->source_mac_addr;
+                                    if (eth_desc->eth_type)
+                                        eth_type = eth_desc->eth_type;
+                                    if (eth_desc->vlan_tags &&
+                                            eth_desc->vlan_tags->count > 0 &&
+                                            eth_desc->vlan_tags->first) {
+                                        const char *tag =
+                                            (const char *)
+                                            eth_desc->vlan_tags->first->data;
+                                        if (tag) {
+                                            long tci = strtol(tag, NULL, 16);
+                                            int vid = (int)(tci & 0x0FFF);
+                                            int pcp = (int)((tci >> 13) & 0x7);
+                                            ogs_snprintf(vid_str,
+                                                sizeof(vid_str), "%d", vid);
+                                            ogs_snprintf(pcp_str,
+                                                sizeof(pcp_str), "%d", pcp);
+                                        }
+                                    }
+                                }
+
+                                /* Primary flow: TSN stream L2 filter */
+                                if (sub->num_of_flow <
+                                        (int)OGS_ARRAY_SIZE(sub->flow)) {
+                                    flow = &sub->flow[sub->num_of_flow];
+                                    flow->is_eth = true;
+                                    flow->description = NULL;
+                                    ogs_pf_content_from_eth_fields(
+                                            dst_mac, src_mac,
+                                            vid_str, pcp_str, eth_type,
+                                            &flow->eth_content);
+                                    flow->direction = OGS_FLOW_BIDIRECTIONAL;
+                                    sub->num_of_flow++;
+                                    ogs_info("[PCF] EthFlowDescription -> "
+                                        "structured L2 filter (TSN stream)");
+                                }
+
+                                /* Secondary flow: gPTP (EtherType 0x88F7) */
+                                if (sub->num_of_flow <
+                                        (int)OGS_ARRAY_SIZE(sub->flow)) {
+                                    flow2 = &sub->flow[sub->num_of_flow];
+                                    flow2->is_eth = true;
+                                    flow2->description = NULL;
+                                    ogs_pf_content_from_eth_fields(
+                                            "-", "-", "-", "-", "88f7",
+                                            &flow2->eth_content);
+                                    flow2->direction = OGS_FLOW_BIDIRECTIONAL;
+                                    sub->num_of_flow++;
+                                }
+                            }
                             media_component->num_of_sub++;
                         }
                     }
@@ -1363,6 +1802,8 @@ bool pcf_npcf_policyauthorization_handle_update(
 
     QosDecisionList = OpenAPI_list_create();
     ogs_assert(QosDecisionList);
+    QosCharsList = OpenAPI_list_create();
+    ogs_assert(QosCharsList);
 
     for (i = 0; i < ims_data.num_of_media_component; i++) {
         int flow_presence = 0;
@@ -1519,6 +1960,17 @@ bool pcf_npcf_policyauthorization_handle_update(
         ogs_assert(QosDecisionMap);
 
         OpenAPI_list_add(QosDecisionList, QosDecisionMap);
+
+        /* For a dynamically-assigned 5QI, signal the authorized QoS
+         * characteristics in the SmPolicyDecision qosChars, keyed by the 5QI
+         * value (TS 29.512 §4.2.6.6.3). QosData->5qi references this entry. */
+        QosChars = ogs_sbi_build_qos_characteristics(pcc_rule);
+        if (QosChars) {
+            QosCharsMap = OpenAPI_map_create(
+                    ogs_msprintf("%d", QosChars->_5qi), QosChars);
+            ogs_assert(QosCharsMap);
+            OpenAPI_list_add(QosCharsList, QosCharsMap);
+        }
     }
 
     if (PccRuleList->count)
@@ -1526,6 +1978,9 @@ bool pcf_npcf_policyauthorization_handle_update(
 
     if (QosDecisionList->count)
         SmPolicyDecision.qos_decs = QosDecisionList;
+
+    if (QosCharsList->count)
+        SmPolicyDecision.qos_chars = QosCharsList;
 
     memset(&sendmsg, 0, sizeof(sendmsg));
 
@@ -1563,6 +2018,19 @@ bool pcf_npcf_policyauthorization_handle_update(
     }
     OpenAPI_list_free(QosDecisionList);
 
+    OpenAPI_list_for_each(QosCharsList, node) {
+        QosCharsMap = node->data;
+        if (QosCharsMap) {
+            QosChars = QosCharsMap->value;
+            if (QosChars)
+                OpenAPI_qos_characteristics_free(QosChars);
+            if (QosCharsMap->key)
+                ogs_free(QosCharsMap->key);
+            ogs_free(QosCharsMap);
+        }
+    }
+    OpenAPI_list_free(QosCharsList);
+
     ogs_ims_data_free(&ims_data);
     OGS_SESSION_DATA_FREE(&session_data);
 
@@ -1598,6 +2066,19 @@ cleanup:
         }
     }
     OpenAPI_list_free(QosDecisionList);
+
+    OpenAPI_list_for_each(QosCharsList, node) {
+        QosCharsMap = node->data;
+        if (QosCharsMap) {
+            QosChars = QosCharsMap->value;
+            if (QosChars)
+                OpenAPI_qos_characteristics_free(QosChars);
+            if (QosCharsMap->key)
+                ogs_free(QosCharsMap->key);
+            ogs_free(QosCharsMap);
+        }
+    }
+    OpenAPI_list_free(QosCharsList);
 
     ogs_ims_data_free(&ims_data);
     OGS_SESSION_DATA_FREE(&session_data);

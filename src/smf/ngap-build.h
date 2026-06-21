@@ -26,6 +26,50 @@
 extern "C" {
 #endif
 
+/* CN Packet Delay Budget (TS 23.501 §5.7.3.4) in 0.01 ms units, signalled on a
+ * NonDynamic5QIDescriptor (TS 38.413 §9.3.1.28, ext IEs 187/188) so the NG-RAN
+ * scheduler can compute the radio deadline 5G-AN PDB = PDB - CN PDB. The CN PDB is
+ * a per-5QI value: it must fit inside that 5QI's PDB (TS 23.501 Table 5.7.4-1), so a
+ * single global constant would over-subtract for tight delay-critical 5QIs (e.g. 5QI
+ * 85, 5 ms PDB) and under-subtract for relaxed ones. Only delay-critical GBR 5QIs
+ * (82-86) carry a CN PDB; a 5QI with no table entry signals none (TS 23.501 §5.7.3.4
+ * — CN PDB is a delay-critical-GBR concept). Values are a topology constant
+ * (PSA-UPF <-> NG-RAN); lab knob, tune per 5QI as experiments demand. */
+typedef struct smf_cn_pdb_s {
+    uint8_t  five_qi;        /* standardized 5QI index */
+    uint16_t cn_pdb_dl_001ms;/* DL CN PDB, 0.01 ms units (0 = omit direction) */
+    uint16_t cn_pdb_ul_001ms;/* UL CN PDB, 0.01 ms units (0 = omit direction) */
+} smf_cn_pdb_t;
+
+static const smf_cn_pdb_t smf_cn_pdb_table[] = {
+    /* CN PDB per TS 23.501 R17 Table 5.7.4-1 NOTEs 4/5/6 (static UPF<->5G-AN delay),
+     * applied symmetrically to DL and UL (the spec gives one one-way value). */
+    { 82, 100, 100 },  /* NOTE 4: 1.00 ms */
+    { 83, 100, 100 },  /* NOTE 4: 1.00 ms */
+    { 84, 500, 500 },  /* NOTE 6: 5.00 ms */
+    { 85, 200, 200 },  /* NOTE 5: 2.00 ms */
+    { 86, 200, 200 },  /* NOTE 5: 2.00 ms */
+    /* 5QIs 87-90 are R18 additions (not in R17 Table 5.7.4-1).
+     * CN PDB values below are extrapolated and UNVERIFIED against
+     * R18 — verify against TS 23.501 R18 Table 5.7.4-1 before relying on them. */
+    { 87, 100, 100 },  /* NOTE 4: 1.00 ms */
+    { 88, 100, 100 },  /* NOTE 4: 1.00 ms */
+    { 89, 100, 100 },  /* NOTE 4: 1.00 ms */
+    { 90, 100, 100 },  /* NOTE 4: 1.00 ms */
+};
+
+/* Return the per-5QI CN PDB entry for a standardized 5QI, or NULL when the 5QI is
+ * not delay-critical GBR (no CN PDB extension is then signalled). */
+static inline const smf_cn_pdb_t *smf_cn_pdb_lookup(uint8_t five_qi)
+{
+    unsigned int i;
+    for (i = 0; i < OGS_ARRAY_SIZE(smf_cn_pdb_table); i++) {
+        if (smf_cn_pdb_table[i].five_qi == five_qi)
+            return &smf_cn_pdb_table[i];
+    }
+    return NULL;
+}
+
 ogs_pkbuf_t *ngap_build_pdu_session_resource_setup_request_transfer(
         smf_sess_t *sess);
 

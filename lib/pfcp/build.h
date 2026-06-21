@@ -68,6 +68,13 @@ void ogs_pfcp_build_update_urr(
 void ogs_pfcp_build_create_bar(
     ogs_pfcp_tlv_create_bar_t *message, ogs_pfcp_bar_t *bar);
 
+void ogs_pfcp_build_ethernet_packet_filter(
+        ogs_pfcp_tlv_ethernet_packet_filter_t *message,
+        ogs_pf_content_t *content, int pdrbuf_idx);
+void ogs_pfcp_parse_ethernet_packet_filter(
+        ogs_pf_content_t *content,
+        ogs_pfcp_tlv_ethernet_packet_filter_t *message);
+
 ogs_pkbuf_t *ogs_pfcp_build_session_report_request(
         uint8_t type, ogs_pfcp_user_plane_report_t *report);
 ogs_pkbuf_t *ogs_pfcp_build_session_report_response(

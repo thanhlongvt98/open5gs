@@ -273,7 +273,7 @@ void smf_bearer_binding(smf_sess_t *sess)
                     ogs_error("No Flow");
                     return;
                 }
-                if (!flow->description) {
+                if (!flow->is_eth && !flow->description) {
                     ogs_error("No Flow-Description");
                     return;
                 }
@@ -282,7 +282,7 @@ void smf_bearer_binding(smf_sess_t *sess)
                  * To add a flow to an existing tft.
                  * duplicated flows are not added
                  */
-                if (smf_pf_find_by_flow(
+                if (!flow->is_eth && smf_pf_find_by_flow(
                     bearer, flow->direction, flow->description) != NULL) {
                     continue;
                 }
@@ -301,6 +301,15 @@ void smf_bearer_binding(smf_sess_t *sess)
                 }
 
                 pf->direction = flow->direction;
+
+                if (flow->is_eth) {
+                    pf->is_eth = true;
+                    pf->eth_content = flow->eth_content;
+                    pf->flow_description = NULL;
+                    ogs_list_add(&bearer->pf_to_add_list, &pf->to_add_node);
+                    continue;
+                }
+
                 pf->flow_description = ogs_strdup(flow->description);
                 ogs_assert(pf->flow_description);
 
@@ -597,6 +606,22 @@ void smf_qos_flow_binding(smf_sess_t *sess)
 
                 memcpy(&qos_flow->qos, &pcc_rule->qos, sizeof(ogs_qos_t));
 
+                /* Bind the SMF-local TSC context to the TSC flow's QFI. One
+                 * TSC context per session, so the first QoS flow created for a
+                 * TSC-assisted session carries the binding; multi-flow-per-
+                 * session TSC is out of scope. */
+                if (sess->tsc && sess->tsc->qfi == 0)
+                    sess->tsc->qfi = qos_flow->qfi;
+
+                /* A TSC-assisted flow that is not ACTIVE runs on its baseline
+                 * 5QI (the NGAP TSC IE is omitted) — record it so the fallback
+                 * success path is visible at the binding stage. */
+                if (sess->tsc && sess->tsc->qfi == qos_flow->qfi &&
+                        sess->tsc->status != TSC_STATUS_ACTIVE)
+                    ogs_info("[SMF] QoS flow QFI[%d] on baseline 5QI "
+                             "(TSC status[%d])",
+                             qos_flow->qfi, sess->tsc->status);
+
                 qos_flow_created = true;
 
             } else {
@@ -651,7 +676,7 @@ void smf_qos_flow_binding(smf_sess_t *sess)
                     ogs_error("No Flow");
                     return;
                 }
-                if (!flow->description) {
+                if (!flow->is_eth && !flow->description) {
                     ogs_error("No Flow-Description");
                     return;
                 }
@@ -660,7 +685,7 @@ void smf_qos_flow_binding(smf_sess_t *sess)
                  * To add a flow to an existing tft.
                  * duplicated flows are not added
                  */
-                if (smf_pf_find_by_flow(
+                if (!flow->is_eth && smf_pf_find_by_flow(
                     qos_flow, flow->direction, flow->description) != NULL) {
                     continue;
                 }
@@ -679,6 +704,15 @@ void smf_qos_flow_binding(smf_sess_t *sess)
                 }
 
                 pf->direction = flow->direction;
+
+                if (flow->is_eth) {
+                    pf->is_eth = true;
+                    pf->eth_content = flow->eth_content;
+                    pf->flow_description = NULL;
+                    ogs_list_add(&qos_flow->pf_to_add_list, &pf->to_add_node);
+                    continue;
+                }
+
                 pf->flow_description = ogs_strdup(flow->description);
                 ogs_assert(pf->flow_description);
 
@@ -727,6 +761,32 @@ void smf_qos_flow_binding(smf_sess_t *sess)
             }
 
             if (qos_flow_created == true) {
+                /* The N3 DL tunnel (gNB TEID/IP) is per-PDU-session and was
+                 * already established on the default flow at session setup
+                 * (TS 23.501 §5.7.1: one N3 tunnel per PDU session, QFI
+                 * distinguishes flows). For a flow ADDED via modify the gNB
+                 * reuses that tunnel; in this OCUDU deployment the N1 QoS rule
+                 * is delivered via DL NAS Transport, so no PDU Session Resource
+                 * Modify Response arrives to run
+                 * ngap_handle_pdu_session_resource_modify_response_transfer(),
+                 * which is what normally copies the gNB N3 DL tunnel onto the
+                 * new flow's DL FAR. Without that, the new DL FAR egresses on
+                 * TEID 0 (frames lost). The session N3 DL outer header already
+                 * lives on the default flow's DL FAR (set at session setup in
+                 * ngap_handle_pdu_session_resource_setup_response_transfer);
+                 * copy it onto the new QoS flow so DL traffic rides the session
+                 * tunnel. */
+                smf_bearer_t *default_dl = smf_default_bearer_in_sess(sess);
+                if (qos_flow->dl_far && default_dl && default_dl->dl_far &&
+                        default_dl->dl_far->outer_header_creation.teid) {
+                    qos_flow->dl_far->apply_action = OGS_PFCP_APPLY_ACTION_FORW;
+                    memcpy(&qos_flow->dl_far->outer_header_creation,
+                            &default_dl->dl_far->outer_header_creation,
+                            sizeof(qos_flow->dl_far->outer_header_creation));
+                    qos_flow->dl_far->outer_header_creation_len =
+                            default_dl->dl_far->outer_header_creation_len;
+                }
+
                 smf_bearer_tft_update(qos_flow);
                 smf_bearer_qos_update(qos_flow);
 
@@ -778,11 +838,51 @@ void smf_qos_flow_binding(smf_sess_t *sess)
     }
 
     if (ogs_list_count(&sess->qos_flow_to_modify_list)) {
-        ogs_assert(OGS_OK ==
-                smf_5gc_pfcp_send_qos_flow_list_modification_request(
-                    sess, NULL,
-                    HOME_ROUTED_ROAMING_IN_HSMF(sess) ?
-                        OGS_PFCP_MODIFY_HOME_ROUTED_ROAMING|pfcp_flags :
-                        pfcp_flags, 0));
+        if ((pfcp_flags & OGS_PFCP_MODIFY_CREATE) &&
+                !HOME_ROUTED_ROAMING_IN_HSMF(sess) &&
+                ogs_list_count(&sess->qos_flow_to_modify_list) == 1) {
+            /*
+             * PCF-initiated SM policy update (TS 23.502 §4.3.3.2) added
+             * exactly one new QoS flow on a non-home-routed session.
+             *
+             * Route via the ONE-FLOW sender, NOT the list sender:
+             *   - The LIST sender force-ORs OGS_PFCP_MODIFY_SESSION into
+             *     xact->modify_flags (pfcp-path.c).  In the PFCP response
+             *     handler (smf_5gc_n4_handle_session_modification_response)
+             *     OGS_PFCP_MODIFY_SESSION with CREATE routes into the
+             *     Home-Routed V-SMF forwarding path
+             *     (smf_nsmf_pdusession_build_vsmf_update_data), which
+             *     immediately asserts sess->vsmf_pdu_session_uri and aborts
+             *     the SMF on any non-home-routed session.
+             *   - The ONE-FLOW sender does NOT set OGS_PFCP_MODIFY_SESSION,
+             *     so the response lands at the CREATE + NETWORK_REQUESTED
+             *     branch (n4-handler.c), which correctly issues a
+             *     PDU Session Modification Command (TS 24.501 §8.3.2) plus
+             *     NGAP PDU Session Resource Modify Request (TS 38.413 §8.2.3)
+             *     via smf_namf_comm_send_n1_n2_message_transfer.
+             *
+             * Flags: NETWORK_REQUESTED | CREATE (no SESSION).
+             * The PMIC-only and IP-session paths are unaffected: they either
+             * have no CREATE flag or use the list sender for multi-flow / HR.
+             */
+            ogs_lnode_t *node =
+                    ogs_list_first(&sess->qos_flow_to_modify_list);
+            ogs_assert(node);
+            smf_bearer_t *created_flow =
+                    ogs_container_of(node, smf_bearer_t, to_modify_node);
+            ogs_assert(created_flow);
+            ogs_assert(OGS_OK ==
+                    smf_5gc_pfcp_send_one_qos_flow_modification_request(
+                        created_flow, NULL,
+                        OGS_PFCP_MODIFY_NETWORK_REQUESTED|
+                            OGS_PFCP_MODIFY_CREATE, 0));
+        } else {
+            ogs_assert(OGS_OK ==
+                    smf_5gc_pfcp_send_qos_flow_list_modification_request(
+                        sess, NULL,
+                        HOME_ROUTED_ROAMING_IN_HSMF(sess) ?
+                            OGS_PFCP_MODIFY_HOME_ROUTED_ROAMING|pfcp_flags :
+                            pfcp_flags, 0));
+        }
     }
 }

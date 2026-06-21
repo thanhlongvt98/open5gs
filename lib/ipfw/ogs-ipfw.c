@@ -604,3 +604,96 @@ void ogs_pf_content_from_ipfw_rule(
     content->num_of_component = j;
     content->length = len;
 }
+
+/*
+ * ogs_pf_content_from_eth_fields - populate an ogs_pf_content_t from structured
+ * Ethernet filter fields (TS 24.501 §9.11.4.13).
+ *
+ * Each field pointer may be NULL or "-" when absent. MACs accept ':' or '-'
+ * as octet separator. vid and ethertype are stored host-order; NAS/PFCP
+ * encoders byte-swap them. pcp_dei is stored as (pcp << 1) with DEI=0.
+ */
+void ogs_pf_content_from_eth_fields(
+        const char *dst_mac, const char *src_mac,
+        const char *vid_str, const char *pcp_str, const char *eth_type,
+        ogs_pf_content_t *content)
+{
+    int n = 0, i;
+
+    ogs_assert(content);
+    memset(content, 0, sizeof(*content));
+
+    /* dst MAC */
+    if (dst_mac && dst_mac[0] && strcmp(dst_mac, "-") != 0) {
+        unsigned int b[6];
+        char mac_buf[18];
+        ogs_snprintf(mac_buf, sizeof(mac_buf), "%s", dst_mac);
+        for (i = 0; i < (int)strlen(mac_buf); i++)
+            if (mac_buf[i] == '-') mac_buf[i] = ':';
+        if (sscanf(mac_buf, "%2x:%2x:%2x:%2x:%2x:%2x",
+                &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) == 6) {
+            content->component[n].type =
+                OGS_PACKET_FILTER_DESTINATION_MAC_ADDRESS_TYPE;
+            for (i = 0; i < 6; i++)
+                content->component[n].mac[i] = (uint8_t)b[i];
+            n++;
+        }
+    }
+    /* src MAC */
+    if (src_mac && src_mac[0] && strcmp(src_mac, "-") != 0) {
+        unsigned int b[6];
+        char mac_buf[18];
+        ogs_snprintf(mac_buf, sizeof(mac_buf), "%s", src_mac);
+        for (i = 0; i < (int)strlen(mac_buf); i++)
+            if (mac_buf[i] == '-') mac_buf[i] = ':';
+        if (sscanf(mac_buf, "%2x:%2x:%2x:%2x:%2x:%2x",
+                &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) == 6) {
+            content->component[n].type =
+                OGS_PACKET_FILTER_SOURCE_MAC_ADDRESS_TYPE;
+            for (i = 0; i < 6; i++)
+                content->component[n].mac[i] = (uint8_t)b[i];
+            n++;
+        }
+    }
+    /* C-TAG VID */
+    if (vid_str && vid_str[0] && strcmp(vid_str, "-") != 0) {
+        content->component[n].type = OGS_PACKET_FILTER_8021Q_C_TAG_VID_TYPE;
+        content->component[n].vid = (uint16_t)atoi(vid_str);
+        n++;
+    }
+    /* C-TAG PCP/DEI */
+    if (pcp_str && pcp_str[0] && strcmp(pcp_str, "-") != 0) {
+        content->component[n].type =
+            OGS_PACKET_FILTER_8021Q_C_TAG_PCP_DEI_TYPE;
+        content->component[n].pcp_dei =
+            (uint8_t)((atoi(pcp_str) & 0x7) << 1);
+        n++;
+    }
+    /* EtherType */
+    if (eth_type && eth_type[0] && strcmp(eth_type, "-") != 0) {
+        content->component[n].type = OGS_PACKET_FILTER_ETHERTYPE_TYPE;
+        content->component[n].ethertype =
+            (uint16_t)strtol(eth_type, NULL, 16);
+        n++;
+    }
+
+    content->num_of_component = (uint8_t)n;
+    {
+        uint8_t bytelen = 0, c;
+        for (c = 0; c < (uint8_t)n; c++) {
+            bytelen += 1;
+            switch (content->component[c].type) {
+            case OGS_PACKET_FILTER_DESTINATION_MAC_ADDRESS_TYPE:
+            case OGS_PACKET_FILTER_SOURCE_MAC_ADDRESS_TYPE:
+                bytelen += 6; break;
+            case OGS_PACKET_FILTER_8021Q_C_TAG_VID_TYPE:
+            case OGS_PACKET_FILTER_ETHERTYPE_TYPE:
+                bytelen += 2; break;
+            case OGS_PACKET_FILTER_8021Q_C_TAG_PCP_DEI_TYPE:
+                bytelen += 1; break;
+            default: break;
+            }
+        }
+        content->length = bytelen;
+    }
+}

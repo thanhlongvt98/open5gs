@@ -20,15 +20,97 @@
 #include "sbi-path.h"
 #include "pfcp-path.h"
 #include "nas-path.h"
+#include "gsm-build.h"
+#include "namf-build.h"
 #include "local-path.h"
 #include "binding.h"
 
 #include "npcf-handler.h"
 
+/* ingest the standard TSCAI input containers from a PCC rule
+ * (TS 29.512) into the SMF-local TSC context. Direction is implicit in
+ * DL vs UL container presence (TS 23.501 Table 5.27.2-1). Clock conversion of
+ * the burst arrival time is deferred; the raw value is stored as the
+ * TSN-clock field. */
+static void smf_tsc_ingest_pcc_rule(
+        smf_sess_t *sess, OpenAPI_pcc_rule_t *PccRule)
+{
+    OpenAPI_tscai_input_container_t *dl = NULL, *ul = NULL, *t = NULL;
+    tsc_context_t *tsc = NULL;
+
+    ogs_assert(sess);
+    ogs_assert(PccRule);
+
+    if (PccRule->tscai_input_dl && !PccRule->is_tscai_input_dl_null)
+        dl = PccRule->tscai_input_dl;
+    if (PccRule->tscai_input_ul && !PccRule->is_tscai_input_ul_null)
+        ul = PccRule->tscai_input_ul;
+
+    if (!dl && !ul)
+        return; /* no TSC assistance on this rule -> baseline, sess->tsc NULL */
+
+    tsc = smf_sess_tsc_add(sess);
+    if (!tsc)
+        return;
+
+    /* Timing is read from whichever container is present (prefer DL). */
+    t = dl ? dl : ul;
+
+    if (t->is_periodicity)
+        tsc->periodicity_us = (uint64_t)t->periodicity;
+    if (t->is_sur_time_in_time)
+        tsc->survival_time_us = (uint32_t)t->sur_time_in_time;
+    if (t->burst_arrival_time) {
+        /* TSCAI burstArrivalTime is an RFC3339 DateTime referenced to the
+         * external (TSN) grandmaster (TS 29.514 §5.6.2.39); parse it to a
+         * nanosecond value (ogs_time_t is microseconds). */
+        ogs_time_t bat_us = 0;
+        if (ogs_sbi_time_from_string(&bat_us, t->burst_arrival_time))
+            tsc->burst_arrival_time_tsn = (uint64_t)bat_us * 1000;
+        else
+            tsc->burst_arrival_time_tsn =
+                (uint64_t)strtoull(t->burst_arrival_time, NULL, 0);
+        /* TSCAC -> TSCAI clock-domain conversion (TS 23.501 §5.27.2.4): the
+         * external-GM burst arrival time is shifted to the 5GS clock by the
+         * external-minus-5GS time offset measured by the NW-TT/UPF and reported
+         * over N4 (TS 29.244 §5.26.4). The offset is 0 in a single-time-domain
+         * deployment, so this reduces to identity but is no longer hardcoded. */
+        tsc->burst_arrival_time_5g =
+            (uint64_t)((int64_t)tsc->burst_arrival_time_tsn -
+                    tsc->clock_drift_offset_ns);
+    }
+
+    if (dl && ul)
+        tsc->direction = TSC_BOTH;
+    else if (dl)
+        tsc->direction = TSC_DL;
+    else
+        tsc->direction = TSC_UL;
+
+    /* classify on the MANDATORY field. Periodicity is mandatory
+     * (TS 38.413 §9.3.1.131); Burst Arrival Time is optional (absent until the
+     * G-clock conversion), so its absence is NOT a downgrade. A flow
+     * that is not ACTIVE omits the NGAP IE and runs on its 5QI. */
+    if (!t->is_periodicity)
+        smf_sess_tsc_set_status(tsc, TSC_STATUS_PARTIAL,
+                TSC_REASON_NO_PERIODICITY);
+    else if (tsc->periodicity_us > 640000)
+        smf_sess_tsc_set_status(tsc, TSC_STATUS_DOWNGRADED,
+                TSC_REASON_PERIODICITY_RANGE);
+    else
+        smf_sess_tsc_set_status(tsc, TSC_STATUS_ACTIVE, NULL);
+
+    ogs_info("[SMF] TSC ingest: PSI[%d] dir[%d] periodicity[%llu us] "
+             "survival[%u us] status[%d]",
+             sess->psi, tsc->direction,
+             (unsigned long long)tsc->periodicity_us,
+             tsc->survival_time_us, tsc->status);
+}
+
 static void update_authorized_pcc_rule_and_qos(
         smf_sess_t *sess, OpenAPI_sm_policy_decision_t *SmPolicyDecision)
 {
-    OpenAPI_lnode_t *node = NULL, *node2 = NULL;
+    OpenAPI_lnode_t *node = NULL, *node2 = NULL, *node3 = NULL;
 
     ogs_assert(sess);
     ogs_assert(SmPolicyDecision);
@@ -231,14 +313,20 @@ static void update_authorized_pcc_rule_and_qos(
                         continue;
                     }
 
-                    if (!FlowInformation->flow_description) {
-                        ogs_error("No FlowDescription");
+                    if (FlowInformation->eth_flow_description) {
+                        flow->is_eth = true;
+                        flow->description = NULL;
+                        ogs_pf_content_from_eth_flow_description(
+                                FlowInformation->eth_flow_description,
+                                &flow->eth_content);
+                    } else if (FlowInformation->flow_description) {
+                        flow->description =
+                            ogs_strdup(FlowInformation->flow_description);
+                        ogs_assert(flow->description);
+                    } else {
+                        ogs_error("No FlowDescription or EthFlowDescription");
                         continue;
                     }
-
-                    flow->description =
-                        ogs_strdup(FlowInformation->flow_description);
-                    ogs_assert(flow->description);
 
                     pcc_rule->num_of_flow++;
                 }
@@ -296,6 +384,43 @@ static void update_authorized_pcc_rule_and_qos(
                 pcc_rule->qos.gbr.downlink =
                     ogs_sbi_bitrate_from_string(QosData->gbr_dl);
 
+            /* Operator-defined Dynamic 5QI (TS 29.512 §4.2.6.6.3): the authorized
+             * 5G QoS characteristics travel in the SmPolicyDecision qosChars,
+             * keyed by the dynamic 5QI value referenced in QosData->_5qi. When a
+             * matching entry is present, populate the dynamic descriptor so the
+             * SMF emits an NGAP Dynamic5QIDescriptor (TS 38.413 §9.3.1.18). */
+            if (SmPolicyDecision->qos_chars) {
+                OpenAPI_list_for_each(SmPolicyDecision->qos_chars, node3) {
+                    OpenAPI_map_t *QosCharsMap = node3->data;
+                    OpenAPI_qos_characteristics_t *QosChars =
+                        QosCharsMap ? QosCharsMap->value : NULL;
+                    ogs_dyn_5qi_t *dyn = &pcc_rule->qos.dyn_5qi;
+
+                    if (!QosChars || QosChars->_5qi != QosData->_5qi)
+                        continue;
+
+                    dyn->is_dynamic = true;
+                    dyn->five_qi = QosChars->_5qi;
+                    dyn->delay_critical = (QosChars->resource_type ==
+                            OpenAPI_qos_resource_type_CRITICAL_GBR);
+                    dyn->priority_level = QosChars->priority_level;
+                    dyn->packet_delay_budget = QosChars->packet_delay_budget;
+                    if (QosChars->packet_error_rate) {
+                        unsigned int scalar = 0, exponent = 0;
+                        if (sscanf(QosChars->packet_error_rate, "%uE-%u",
+                                    &scalar, &exponent) == 2) {
+                            dyn->packet_error_rate.scalar = scalar;
+                            dyn->packet_error_rate.exponent = exponent;
+                        }
+                    }
+                    if (QosChars->is_averaging_window)
+                        dyn->averaging_window = QosChars->averaging_window;
+                    if (QosChars->is_max_data_burst_vol)
+                        dyn->max_data_burst_volume = QosChars->max_data_burst_vol;
+                    break;
+                }
+            }
+
             if (pcc_rule->qos.mbr.downlink || pcc_rule->qos.mbr.uplink ||
                 pcc_rule->qos.gbr.downlink || pcc_rule->qos.gbr.uplink) {
                 if (pcc_rule->qos.mbr.downlink == 0 ||
@@ -311,6 +436,10 @@ static void update_authorized_pcc_rule_and_qos(
                     pcc_rule->qos.gbr.uplink > OGS_MAX_BITRATE_NGAP)
                     pcc_rule->qos.gbr.uplink = OGS_MAX_BITRATE_NGAP;
             }
+
+            /* ingest TSCAI from this PCC rule into the
+             * SMF-local TSC context. */
+            smf_tsc_ingest_pcc_rule(sess, PccRule);
 
             sess->policy.num_of_pcc_rule++;
         }
@@ -582,16 +711,23 @@ bool smf_npcf_smpolicycontrol_handle_create(
     up2cp_far = sess->up2cp_far;
     ogs_assert(up2cp_far);
 
-    /* Set UE IP Address to the Default DL PDR */
-    ogs_assert(OGS_OK ==
-        ogs_pfcp_paa_to_ue_ip_addr(&sess->paa,
-            &dl_pdr->ue_ip_addr, &dl_pdr->ue_ip_addr_len));
-    dl_pdr->ue_ip_addr.sd = OGS_PFCP_UE_IP_DST;
-
-    if (ogs_global_conf()->parameter.use_upg_vpp == true) {
+    if (sess->session.session_type == OGS_PDU_SESSION_TYPE_ETHERNET) {
+        /* Ethernet PDU session: no UE IP address. Instead flag the DL PDR with
+         * the Ethernet PDU Session Information IE (ETHI, TS 29.244 §8.2.117) so
+         * the UPF treats DL traffic as Ethernet PDU-session frames. */
+        dl_pdr->ethernet_pdu_session_information = true;
+    } else {
+        /* Set UE IP Address to the Default DL PDR */
         ogs_assert(OGS_OK ==
             ogs_pfcp_paa_to_ue_ip_addr(&sess->paa,
-                &ul_pdr->ue_ip_addr, &ul_pdr->ue_ip_addr_len));
+                &dl_pdr->ue_ip_addr, &dl_pdr->ue_ip_addr_len));
+        dl_pdr->ue_ip_addr.sd = OGS_PFCP_UE_IP_DST;
+
+        if (ogs_global_conf()->parameter.use_upg_vpp == true) {
+            ogs_assert(OGS_OK ==
+                ogs_pfcp_paa_to_ue_ip_addr(&sess->paa,
+                    &ul_pdr->ue_ip_addr, &ul_pdr->ue_ip_addr_len));
+        }
     }
 
     if (sess->session.ipv4_framed_routes &&

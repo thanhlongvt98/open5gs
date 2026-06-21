@@ -37,6 +37,7 @@
 #include "timer.h"
 #include "smf-sm.h"
 #include "metrics.h"
+#include "tsc_context.h"
 
 #if HAVE_NET_IF_H
 #include <net/if.h>
@@ -229,6 +230,9 @@ ED3(uint8_t spare:2;,
 
     ogs_ipfw_rule_t ipfw_rule;
     char *flow_description;
+
+    bool is_eth;                 /* TSN Ethernet packet filter (TS 24.501 §9.11.4.13) */
+    ogs_pf_content_t eth_content;
 
     ogs_pool_id_t bearer_id;
 } smf_pf_t;
@@ -671,6 +675,9 @@ typedef struct smf_sess_s {
 
     ogs_gtp_node_t  *gnode;
     ogs_pfcp_node_t *pfcp_node;
+
+    /* SMF-local TSC assistance state. NULL for baseline sessions. */
+    tsc_context_t   *tsc;
 
     ogs_pool_id_t smf_ue_id;
 

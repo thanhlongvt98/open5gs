@@ -544,6 +544,14 @@ ogs_pfcp_pdr_t *ogs_pfcp_handle_create_pdr(ogs_pfcp_sess_t *sess,
 
     ogs_pfcp_rule_remove_all(pdr);
 
+    if (message->pdi.ethernet_packet_filter.presence) {
+        ogs_pfcp_rule_t *rule = ogs_pfcp_rule_add(pdr);
+        ogs_assert(rule);
+        ogs_pfcp_parse_ethernet_packet_filter(
+                &rule->eth_content, &message->pdi.ethernet_packet_filter);
+        rule->is_eth = true;
+    }
+
     for (i = 0; i < ogs_min(OGS_ARRAY_SIZE(message->pdi.sdf_filter),
                 OGS_MAX_NUM_OF_FLOW_IN_PDR); i++) {
         ogs_pfcp_sdf_filter_t sdf_filter;
@@ -586,6 +594,19 @@ ogs_pfcp_pdr_t *ogs_pfcp_handle_create_pdr(ogs_pfcp_sess_t *sess,
             memcpy(&rule->ipfw, &oppsite_direction_rule->ipfw,
                     sizeof(rule->ipfw));
             ogs_ipfw_rule_swap(&rule->ipfw);
+
+            /* TSN Ethernet packet filter (TS 24.501 §9.11.4.13): the L2 match
+             * lives in eth_content, not ipfw, so carry it (and is_eth) to the
+             * opposite-direction rule too. Copied as-is (NOT swapped): the
+             * per-direction MAC interpretation is applied at match time in the
+             * UPF (upf_eth_frame_matches swap_mac — DL/CORE swaps, UL/ACCESS
+             * does not). Without this the UL (ACCESS) eth PDR falls back to IP
+             * matching, never matches the L2 frame, and the UPF drops every UL
+             * stream frame with a GTP-U Error Indication. */
+            if (oppsite_direction_rule->is_eth) {
+                rule->is_eth = true;
+                rule->eth_content = oppsite_direction_rule->eth_content;
+            }
         }
 
         /* If BID, Store SDF Filter ID */
@@ -604,7 +625,6 @@ ogs_pfcp_pdr_t *ogs_pfcp_handle_create_pdr(ogs_pfcp_sess_t *sess,
                     sdf_filter.flow_description_len+1);
 
             rv = ogs_ipfw_compile_rule(&rule->ipfw, flow_description);
-
             if (rv != OGS_OK) {
                 ogs_error("ogs_ipfw_compile_rule() failed [%s]",
                         flow_description);
@@ -934,6 +954,14 @@ ogs_pfcp_pdr_t *ogs_pfcp_handle_update_pdr(ogs_pfcp_sess_t *sess,
 
         ogs_pfcp_rule_remove_all(pdr);
 
+        if (message->pdi.ethernet_packet_filter.presence) {
+            ogs_pfcp_rule_t *rule = ogs_pfcp_rule_add(pdr);
+            ogs_assert(rule);
+            ogs_pfcp_parse_ethernet_packet_filter(
+                    &rule->eth_content, &message->pdi.ethernet_packet_filter);
+            rule->is_eth = true;
+        }
+
         for (i = 0; i < ogs_min(OGS_ARRAY_SIZE(message->pdi.sdf_filter),
                     OGS_MAX_NUM_OF_FLOW_IN_PDR); i++) {
             ogs_pfcp_sdf_filter_t sdf_filter;
@@ -977,6 +1005,14 @@ ogs_pfcp_pdr_t *ogs_pfcp_handle_update_pdr(ogs_pfcp_sess_t *sess,
                 memcpy(&rule->ipfw, &oppsite_direction_rule->ipfw,
                         sizeof(rule->ipfw));
                 ogs_ipfw_rule_swap(&rule->ipfw);
+
+                /* TSN Ethernet packet filter (TS 24.501 §9.11.4.13): the L2 match
+                 * lives in eth_content, not ipfw, so carry it (and is_eth) to the
+                 * opposite-direction rule too. */
+                if (oppsite_direction_rule->is_eth) {
+                    rule->is_eth = true;
+                    rule->eth_content = oppsite_direction_rule->eth_content;
+                }
             }
 
             /* If BID, Store SDF Filter ID */
@@ -994,6 +1030,9 @@ ogs_pfcp_pdr_t *ogs_pfcp_handle_update_pdr(ogs_pfcp_sess_t *sess,
                         sdf_filter.flow_description,
                         sdf_filter.flow_description_len+1);
 
+                /* TSN Ethernet packet filter sentinel (TS 24.501 §9.11.4.13):
+                 * not an IPFW rule. Parse into rule->eth_content for the UPF
+                 * DL L2 classifier; leave rule->ipfw zeroed (no IP match). */
                 rv = ogs_ipfw_compile_rule(&rule->ipfw, flow_description);
                 if (rv != OGS_OK) {
                     ogs_error("ogs_ipfw_compile_rule() failed [%s]",

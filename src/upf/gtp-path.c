@@ -91,12 +91,273 @@ static int check_framed_routes(upf_sess_t *sess, int family, uint32_t *addr)
     return false;
 }
 
+#define ETHERTYPE_8021Q 0x8100  /* IEEE 802.1Q VLAN tag (TSN streams carry VID + PCP) */
+
+/* Return the L3 EtherType, transparently peeling an 802.1Q VLAN tag if present, so a
+ * tagged TSN frame classifies by its inner type (IP / gPTP) instead of 0x8100 -- this
+ * also stops a tagged frame from being mislogged as "[DROP] Invalid eth_type [8100]". */
 static uint16_t _get_eth_type(uint8_t *data, uint len) {
-    if (len > ETHER_HDR_LEN) {
-        struct ether_header *hdr = (struct ether_header*)data;
-        return htobe16(hdr->ether_type);
+    if (len <= ETHER_HDR_LEN)
+        return 0;
+    struct ether_header *hdr = (struct ether_header *)data;
+    uint16_t et = htobe16(hdr->ether_type);
+    if (et == ETHERTYPE_8021Q && len >= ETHER_HDR_LEN + 4)
+        return htobe16(*(uint16_t *)(data + ETHER_HDR_LEN + 2));  /* inner type, after the TCI */
+    return et;
+}
+
+/* Extract the 802.1Q VID + PCP from a tagged frame; returns false if untagged.
+ * TCI = PCP[3] | DEI[1] | VID[12] (IEEE 802.1Q). DS-TT/NW-TT per TS 23.501 §5.28.3. */
+static bool _get_vlan(const uint8_t *data, uint len, uint16_t *vid, uint8_t *pcp) {
+    if (len < ETHER_HDR_LEN + 4)
+        return false;
+    if (htobe16(*(const uint16_t *)(data + 12)) != ETHERTYPE_8021Q)
+        return false;
+    uint16_t tci = htobe16(*(const uint16_t *)(data + ETHER_HDR_LEN));
+    if (vid)
+        *vid = tci & 0x0FFF;
+    if (pcp)
+        *pcp = (uint8_t)((tci >> 13) & 0x7);
+    return true;
+}
+
+/* UPF-local Ethernet fast-path classification (observability only). */
+#define UPF_MAC_ALEN 6
+#define ETHERTYPE_GPTP 0x88F7  /* IEEE 802.1AS / 1588 gPTP (TS 23.501 §5.27.1.2.2.1) */
+
+typedef enum {
+    UPF_ETH_CLASS_HIT,           /* Ethernet frame on a matched PDR */
+    UPF_ETH_CLASS_MISS,          /* matched PDR, no stream binding */
+    UPF_ETH_CLASS_NO_PDR_MATCH,  /* session known (N3 TEID) but no PDR/filter hit */
+    UPF_ETH_CLASS_GPTP,          /* EtherType 0x88F7 -> NW-TT gPTP path */
+} upf_eth_class_t;
+
+static const char *upf_eth_class_str(upf_eth_class_t c)
+{
+    switch (c) {
+    case UPF_ETH_CLASS_HIT:          return "HIT";
+    case UPF_ETH_CLASS_MISS:         return "MISS";
+    case UPF_ETH_CLASS_NO_PDR_MATCH: return "NO_PDR_MATCH";
+    case UPF_ETH_CLASS_GPTP:         return "GPTP";
+    default:                         return "UNKNOWN";
     }
-    return 0;
+}
+
+/* True when the PDU session carries no UE IP (Ethernet session type). */
+static bool upf_sess_is_ethernet(const upf_sess_t *sess)
+{
+    return sess && !sess->ipv4 && !sess->ipv6;
+}
+
+/* NW-TT MAC-learning bridge (TS 23.501 §5.8.2.5.3).
+ *
+ * The Ethernet PDU session's N6 egress is a TAP device handing us full L2
+ * frames. We use the first configured TAP as the bridge port (single Ethernet
+ * DN in this testbed; matches OAI's single N6 redirect interface). */
+static ogs_pfcp_dev_t *upf_eth_bridge_dev(void)
+{
+    ogs_pfcp_dev_t *dev = NULL;
+    ogs_list_for_each(&ogs_pfcp_self()->dev_list, dev) {
+        if (dev->is_tap)
+            return dev;
+    }
+    return NULL;
+}
+
+/* Match a DL L2 frame against a parsed Ethernet packet filter (TS 24.501
+ * §9.11.4.13). All present components must match (logical AND). A VID or PCP
+ * component on an untagged frame fails the match. Empty filter never matches.
+ *
+ * swap_mac: the AF/PCF emits the filter in UL-canonical form (dst-MAC = the
+ * remote/NW endpoint) so the UE's UL classifier matches UL frames as-is. On the
+ * DL (CORE) interface the remote endpoint is the frame's SOURCE, so the UPF
+ * swaps the dst/src MAC comparison (TS 29.244 §5.2.1A.2A). VID/PCP/EtherType are
+ * direction-independent and compared as-is. */
+static bool upf_eth_frame_matches(
+        const ogs_pf_content_t *c, uint8_t *data, uint len, bool swap_mac)
+{
+    int i;
+    uint16_t vid = 0, et;
+    uint8_t pcp = 0;
+    bool tagged;
+    const uint8_t *dst = data;          /* frame dst MAC */
+    const uint8_t *src = data + 6;      /* frame src MAC */
+
+    if (len < ETHER_HDR_LEN)
+        return false;
+
+    tagged = _get_vlan(data, len, &vid, &pcp);
+
+    for (i = 0; i < c->num_of_component; i++) {
+        switch (c->component[i].type) {
+        case OGS_PACKET_FILTER_DESTINATION_MAC_ADDRESS_TYPE:
+            if (memcmp(swap_mac ? src : dst, c->component[i].mac, 6) != 0)
+                return false;
+            break;
+        case OGS_PACKET_FILTER_SOURCE_MAC_ADDRESS_TYPE:
+            if (memcmp(swap_mac ? dst : src, c->component[i].mac, 6) != 0)
+                return false;
+            break;
+        case OGS_PACKET_FILTER_8021Q_C_TAG_VID_TYPE:
+            if (!tagged || (c->component[i].vid & 0x0FFF) != (vid & 0x0FFF))
+                return false;
+            break;
+        case OGS_PACKET_FILTER_8021Q_C_TAG_PCP_DEI_TYPE:
+            /* component stores (pcp << 1) | DEI; compare the 3-bit PCP */
+            if (!tagged || ((c->component[i].pcp_dei >> 1) & 0x7) != pcp)
+                return false;
+            break;
+        case OGS_PACKET_FILTER_ETHERTYPE_TYPE:
+            et = _get_eth_type(data, len);
+            if (c->component[i].ethertype != et)
+                return false;
+            break;
+        default:
+            break;
+        }
+    }
+    return c->num_of_component > 0;
+}
+
+/* True if the PDR carries any Ethernet packet-filter rule (is_eth). */
+static bool upf_pdr_has_eth_rule(ogs_pfcp_pdr_t *pdr)
+{
+    ogs_pfcp_rule_t *rule = NULL;
+    ogs_list_for_each(&pdr->rule_list, rule)
+        if (rule->is_eth)
+            return true;
+    return false;
+}
+
+/* True if any of the PDR's Ethernet packet-filter rules matches the frame.
+ * swap: DL (CORE) passes true (filter is UL-canonical, dst-MAC = remote = the
+ * DL frame's source); UL (ACCESS) passes false (dst-MAC = the UL frame's dst).
+ * See upf_eth_frame_matches (TS 29.244 §5.2.1A.2A). */
+static bool upf_eth_pdr_matches(
+        ogs_pfcp_pdr_t *pdr, uint8_t *data, uint len, bool swap)
+{
+    ogs_pfcp_rule_t *rule = NULL;
+    ogs_list_for_each(&pdr->rule_list, rule) {
+        if (!rule->is_eth)
+            continue;
+        if (upf_eth_frame_matches(&rule->eth_content, data, len, swap))
+            return true;
+    }
+    return false;
+}
+
+/* Select the downlink PDR of an Ethernet PDU session and hand the raw L2 frame
+ * to ogs_pfcp_up_handle_pdr(), which applies the FAR Outer Header Creation
+ * (GTP-U encap toward the gNB). Consumes pkbuf on success.
+ *
+ * PDR selection (TS 23.501 §5.7.1.1, TS 24.501 §9.11.4.13): a PDR carrying an
+ * Ethernet packet filter (is_eth) matches only frames with the TSN stream's L2
+ * identity (dst MAC / C-TAG VID / PCP / EtherType) and steers them onto the
+ * dedicated QoS flow (QFI 2 / 5QI 85). A DL PDR with no eth filter is the
+ * match-all default flow (QFI 1) and receives everything else. The pdr_list is
+ * precedence-sorted, so the first eth filter that matches wins.
+ * Returns true if the frame was forwarded (pkbuf consumed). */
+static bool upf_eth_dl_forward(upf_sess_t *sess, ogs_pkbuf_t *pkbuf)
+{
+    ogs_pfcp_pdr_t *pdr = NULL, *selected_pdr = NULL, *fallback_pdr = NULL;
+    ogs_pfcp_far_t *far = NULL;
+    ogs_pfcp_user_plane_report_t report;
+    int i;
+
+    ogs_assert(sess);
+    ogs_assert(pkbuf);
+
+    ogs_list_for_each(&sess->pfcp.pdr_list, pdr) {
+        bool has_eth_filter = false, eth_matched = false;
+
+        far = pdr->far;
+        if (!far)
+            continue;
+        if (pdr->src_if != OGS_PFCP_INTERFACE_CORE)
+            continue;
+        if (far->dst_if != OGS_PFCP_INTERFACE_ACCESS)
+            continue;
+        if (far->outer_header_creation.gtpu4 == 0 &&
+            far->outer_header_creation.gtpu6 == 0)
+            continue;
+
+        /* Candidate DL PDR: inspect its Ethernet packet-filter rules.
+         * DL (CORE): swap MAC (filter is UL-canonical). */
+        has_eth_filter = upf_pdr_has_eth_rule(pdr);
+        if (has_eth_filter)
+            eth_matched = upf_eth_pdr_matches(
+                    pdr, pkbuf->data, pkbuf->len, true /* DL: swap MAC */);
+
+        if (has_eth_filter) {
+            if (eth_matched && !selected_pdr)
+                selected_pdr = pdr;     /* precise TSN-stream match */
+        } else if (!fallback_pdr) {
+            fallback_pdr = pdr;         /* match-all default flow */
+        }
+    }
+
+    pdr = selected_pdr ? selected_pdr : fallback_pdr;
+    if (!pdr)
+        return false;
+
+    for (i = 0; i < pdr->num_of_urr; i++)
+        upf_sess_urr_acc_add(sess, pdr->urr[i], pkbuf->len, false);
+
+    ogs_assert(true == ogs_pfcp_up_handle_pdr(
+                pdr, OGS_GTPU_MSGTYPE_GPDU, 0, NULL, pkbuf, &report));
+    return true;
+}
+
+/* Pick the Ethernet PDU session whose DL eth filter matches this frame.
+ * Falls back to the first eth session with only match-all PDRs when no eth
+ * filter hits (single-session testbed). */
+static upf_sess_t *upf_eth_find_session_for_dl(const uint8_t *data, uint len)
+{
+    upf_sess_t *sess = NULL;
+    upf_sess_t *fallback_sess = NULL;
+
+    ogs_list_for_each(&upf_self()->sess_list, sess) {
+        ogs_pfcp_pdr_t *pdr = NULL;
+        bool has_eth_pdr = false;
+
+        if (!upf_sess_is_ethernet(sess))
+            continue;
+
+        ogs_list_for_each(&sess->pfcp.pdr_list, pdr) {
+            if (pdr->src_if != OGS_PFCP_INTERFACE_CORE)
+                continue;
+            if (upf_pdr_has_eth_rule(pdr)) {
+                has_eth_pdr = true;
+                if (upf_eth_pdr_matches(pdr, (uint8_t *)data, len, true))
+                    return sess;
+            }
+        }
+        if (!has_eth_pdr && !fallback_sess)
+            fallback_sess = sess;
+    }
+    return fallback_sess;
+}
+
+/* Flood a DL broadcast/multicast L2 frame to every active Ethernet PDU session
+ * (TS 23.501 §5.8.2.5.3). Each session gets its own copy. Returns true if at
+ * least one Ethernet session was found (the caller then frees the original). */
+static bool upf_eth_dl_flood(ogs_pkbuf_t *pkbuf)
+{
+    upf_sess_t *sess = NULL;
+    bool any = false;
+
+    ogs_list_for_each(&upf_self()->sess_list, sess) {
+        ogs_pkbuf_t *clone = NULL;
+        if (!upf_sess_is_ethernet(sess))
+            continue;
+        any = true;
+        clone = ogs_pkbuf_copy(pkbuf);
+        if (!clone)
+            continue;
+        if (!upf_eth_dl_forward(sess, clone))
+            ogs_pkbuf_free(clone);
+    }
+    return any;
 }
 
 static void _gtpv1_tun_recv_common_cb(
@@ -121,6 +382,40 @@ static void _gtpv1_tun_recv_common_cb(
         ogs_pkbuf_t *replybuf = NULL;
         uint16_t eth_type = _get_eth_type(recvbuf->data, recvbuf->len);
         uint8_t size;
+
+        /* NW-TT bridge DL ingress. The full L2 frame is intact
+         * (dst MAC | src MAC | ethertype | ...). Resolve the destination MAC to
+         * an Ethernet PDU session and GTP-U-encap the whole frame toward the
+         * gNB; flood broadcast/multicast to all Ethernet sessions. Only IP-over-
+         * TAP frames (no Ethernet PDU session) fall through to the ARP/ND/IP
+         * handling below. (TS 23.501 §5.6.10.2, §5.8.2.5.3.) */
+        if (recvbuf->len >= 2 * UPF_MAC_ALEN) {
+            const uint8_t *dst_mac = recvbuf->data;
+            bool group_addr = (dst_mac[0] & 0x01); /* broadcast or multicast */
+
+            /* NW-TT DL VID/PCP observability (validate the per-flow 802.1Q tag in). */
+            uint16_t dl_vid = 0; uint8_t dl_pcp = 0;
+            if (_get_vlan(recvbuf->data, recvbuf->len, &dl_vid, &dl_pcp))
+                ogs_info("[UPF] Ethernet DL vid[%u] pcp[%u] ethertype[0x%04x] %s",
+                         dl_vid, dl_pcp, _get_eth_type(recvbuf->data, recvbuf->len),
+                         group_addr ? "(flood)" : "(unicast)");
+
+            if (!group_addr) {
+                upf_sess_t *esess = upf_eth_find_session_for_dl(
+                        recvbuf->data, recvbuf->len);
+                if (esess) {
+                    if (upf_eth_dl_forward(esess, recvbuf))
+                        return; /* recvbuf consumed by ogs_pfcp_up_handle_pdr() */
+                    goto cleanup;
+                }
+                /* dst-MAC not matched by any eth filter: flood per bridge behaviour. */
+                if (upf_eth_dl_flood(recvbuf))
+                    goto cleanup;
+            } else {
+                if (upf_eth_dl_flood(recvbuf))
+                    goto cleanup; /* copies forwarded; free the original */
+            }
+        }
 
         if (eth_type == ETHERTYPE_ARP) {
             if (is_arp_req(recvbuf->data, recvbuf->len) &&
@@ -155,6 +450,23 @@ static void _gtpv1_tun_recv_common_cb(
             ogs_pkbuf_free(replybuf);
             goto cleanup;
         }
+        /* downlink gPTP detection (NW-TT DL ingress observed).
+         * sess is not yet known here (pre-strip); the gate is interface-level
+         * (has_eth = TAP/Ethernet). The full NW-TT DL ingress action (TSi
+         * timestamp, correctionField/rateRatio update, TSi suffix; forward to
+         * DS-TT per TS 23.501 §5.27.1.2.2.1) is deferred -- we only observe it,
+         * then fall through to the existing drop. */
+        if (eth_type == ETHERTYPE_GPTP) {
+            /* Known/expected NW-TT DL gPTP frame: observation + forward is
+             * deferred (see above). Drop it QUIETLY at debug level and skip the
+             * generic eth_type error + hexdump below, which otherwise floods the
+             * log ~1/sec with this benign, expected frame. */
+            ogs_debug("[UPF] Ethernet DL class[%s] ethertype[0x%04x] len[%d] "
+                      "(NW-TT gPTP ingress observed; timestamp/forward deferred)",
+                      upf_eth_class_str(UPF_ETH_CLASS_GPTP), eth_type, recvbuf->len);
+            goto cleanup;
+        }
+
         if (eth_type != ETHERTYPE_IP && eth_type != ETHERTYPE_IPV6) {
             ogs_error("[DROP] Invalid eth_type [%x]]", eth_type);
             ogs_log_hexdump(OGS_LOG_ERROR, recvbuf->data, recvbuf->len);
@@ -467,9 +779,23 @@ static void _gtpv1_u_recv_cb(short when, ogs_socket_t fd, void *data)
                     continue;
 
                 /* Check if Rule List in PDR */
-                if (ogs_list_first(&pdr->rule_list) &&
-                    ogs_pfcp_pdr_rule_find_by_packet(pdr, pkbuf) == NULL)
-                    continue;
+                if (ogs_list_first(&pdr->rule_list)) {
+                    if (upf_pdr_has_eth_rule(pdr)) {
+                        /* Ethernet PDU-session UL PDR: the SDF rule is an L2 eth
+                         * filter (is_eth), not an IP rule. ogs_pfcp_pdr_rule_
+                         * find_by_packet() is IP-only and treats an Ethernet
+                         * frame as "non-IP" → returns NULL → the frame would be
+                         * dropped with a GTP-U Error Indication. Match the eth
+                         * filter instead. UL (ACCESS): the filter is UL-canonical
+                         * (dst-MAC = remote = the UL frame's dst) → no MAC swap. */
+                        if (!upf_eth_pdr_matches(
+                                pdr, pkbuf->data, pkbuf->len, false))
+                            continue;
+                    } else if (ogs_pfcp_pdr_rule_find_by_packet(
+                                pdr, pkbuf) == NULL) {
+                        continue;
+                    }
+                }
 
                 break;
             }
@@ -515,6 +841,38 @@ static void _gtpv1_u_recv_cb(short when, ogs_socket_t fd, void *data)
 
         far = pdr->far;
         ogs_assert(far);
+
+        if (upf_sess_is_ethernet(sess)) {
+            uint16_t inner_eth_type = _get_eth_type(pkbuf->data, pkbuf->len);
+            upf_eth_class_t klass = (inner_eth_type == ETHERTYPE_GPTP)
+                ? UPF_ETH_CLASS_GPTP : UPF_ETH_CLASS_HIT;
+            /* UL VID/PCP observability (validate the per-flow 802.1Q tag out). */
+            uint16_t ul_vid = 0; uint8_t ul_pcp = 0;
+            _get_vlan(pkbuf->data, pkbuf->len, &ul_vid, &ul_pcp);
+            ogs_info("[UPF] Ethernet UL class[%s] ethertype[0x%04x] vid[%u] pcp[%u] QFI[%d] "
+                     "SEID[0x%llx]", upf_eth_class_str(klass), inner_eth_type, ul_vid, ul_pcp,
+                     pdr->qfi, (unsigned long long)sess->upf_n4_seid);
+        }
+
+        /* Ethernet PDU session UL egress: deliver the raw L2 frame to N6 TAP. */
+        if (upf_sess_is_ethernet(sess)) {
+            ogs_pfcp_dev_t *eth_dev = upf_eth_bridge_dev();
+
+            if (far->dst_if == OGS_PFCP_INTERFACE_CORE && eth_dev) {
+                for (i = 0; i < pdr->num_of_urr; i++)
+                    upf_sess_urr_acc_add(sess, pdr->urr[i], pkbuf->len, true);
+                if (pkbuf->len < ETHER_HDR_LEN) {
+                    ogs_warn("Dropping runt Ethernet frame: len=%d", pkbuf->len);
+                    goto cleanup;
+                }
+                if (ogs_tun_write(eth_dev->fd, pkbuf) != OGS_OK)
+                    ogs_warn("ogs_tun_write() (Ethernet UL) failed");
+            } else {
+                ogs_error("[DROP] Ethernet UL: no TAP egress "
+                          "(dst_if[%d])", far->dst_if);
+            }
+            goto cleanup;
+        }
 
         /*
          * From Issue #1354
