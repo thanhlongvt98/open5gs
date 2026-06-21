@@ -100,6 +100,8 @@ typedef struct OpenAPI_media_component_rm_s {
     struct OpenAPI_tscai_input_container_s *tscai_input_ul;
     bool is_tscai_time_dom;
     int tscai_time_dom;
+    bool is_max_data_burst_vol;
+    int max_data_burst_vol;
 } OpenAPI_media_component_rm_t;
 
 OpenAPI_media_component_rm_t *OpenAPI_media_component_rm_create(
@@ -172,7 +174,9 @@ OpenAPI_media_component_rm_t *OpenAPI_media_component_rm_create(
     bool is_tscai_input_ul_null,
     OpenAPI_tscai_input_container_t *tscai_input_ul,
     bool is_tscai_time_dom,
-    int tscai_time_dom
+    int tscai_time_dom,
+    bool is_max_data_burst_vol,
+    int max_data_burst_vol
 );
 void OpenAPI_media_component_rm_free(OpenAPI_media_component_rm_t *media_component_rm);
 OpenAPI_media_component_rm_t *OpenAPI_media_component_rm_parseFromJSON(cJSON *media_component_rmJSON);

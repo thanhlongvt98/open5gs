@@ -663,6 +663,116 @@ cleanup:
     return false;
 }
 
+
+/*
+ * handle the SMF-initiated Npcf_SMPolicyControl_Update
+ * (TS 29.512 §4.2.4) — in particular the 5GS TSN bridge information reported by
+ * the SMF when the TSN_BRIDGE_INFO trigger is met. The PCF records it and (per
+ * TS 29.514) relays it to the subscribed TSN AF over N5.
+ */
+bool pcf_npcf_smpolicycontrol_handle_update(pcf_sess_t *sess,
+        ogs_sbi_stream_t *stream, ogs_sbi_message_t *recvmsg)
+{
+    OpenAPI_sm_policy_update_context_data_t *UpdateData = NULL;
+
+    ogs_assert(sess);
+    ogs_assert(stream);
+    ogs_assert(recvmsg);
+
+    UpdateData = recvmsg->SmPolicyUpdateContextData;
+    if (!UpdateData) {
+        ogs_error("No SmPolicyUpdateContextData");
+        ogs_assert(true == ogs_sbi_server_send_error(stream,
+                OGS_SBI_HTTP_STATUS_BAD_REQUEST, recvmsg,
+                "No SmPolicyUpdateContextData", NULL, NULL));
+        return false;
+    }
+
+    if (UpdateData->tsn_bridge_info) {
+        OpenAPI_tsn_bridge_info_t *bi = UpdateData->tsn_bridge_info;
+        ogs_info("[PCF] 5GS TSN bridge reported: bridgeId[%d] DS-TT port[%d]"
+                 "%s%s -> relay to TSN AF",
+                 bi->is_bridge_id ? bi->bridge_id : -1,
+                 bi->is_dstt_port_num ? bi->dstt_port_num : -1,
+                 bi->dstt_addr ? " DS-TT MAC " : "",
+                 bi->dstt_addr ? bi->dstt_addr : "");
+
+        /* the DS-TT MAC lets the PCF bind the N5 app-session by ueMac
+         * (Ethernet sessions have no UE IP, TS 29.514). Store it for the local
+         * app-session lookup, and register a BSF binding by MAC (TS 29.521
+         * PcfBinding.macAddr48). The 204 to the SMF is deferred to the BSF
+         * register response (mac_register_pending). */
+        if (bi->dstt_addr &&
+            pcf_sess_set_mac_addr(sess, bi->dstt_addr) == true) {
+            int r;
+
+            /* Register the BSF MAC-binding FIRST (local, fast) so it is in place
+             * before the AF's ueMac app-session create (triggered by the relay
+             * below) reaches the PCF -> avoids a discover-by-MAC 404 race. */
+            sess->mac_register_pending = true;
+            r = pcf_sess_sbi_discover_and_send(
+                    OGS_SBI_SERVICE_TYPE_NBSF_MANAGEMENT, NULL,
+                    pcf_nbsf_management_build_register, sess, stream, NULL);
+            ogs_expect(r == OGS_OK);
+
+            /* Notify the TSN AF of the new 5GS bridge over standard N5
+             * (TS 29.514 §4.2.5.16): POST PduSessionTsnBridge to
+             * {notifUri}/new-bridge. dsttAddr = the DS-TT *port* MAC from N1;
+             * dsttResidTime = UE-DS-TT residence time (ns). */
+            pcf_sbi_send_tsn_bridge_new_bridge(
+                    bi->is_bridge_id ? bi->bridge_id : 0,
+                    bi->is_dstt_port_num ? bi->dstt_port_num : 0,
+                    bi->dstt_addr,
+                    bi->is_dstt_resid_time, bi->dstt_resid_time);
+
+            if (r == OGS_OK)
+                return true; /* 204 sent by the BSF register response handler */
+            sess->mac_register_pending = false;
+        }
+    }
+
+    ogs_expect(true ==
+            ogs_sbi_send_response(stream, OGS_SBI_HTTP_STATUS_NO_CONTENT));
+
+    return true;
+}
+
+/* PCF QoS mapping table: standardized Delay-critical GBR 5QIs from TS 23.501 R17
+ * Table 5.7.4-1, restricted to the set the gNB knows from its default config
+ * (CU-CP + DU) so no per-5QI gNB qos block is needed. */
+typedef struct pcf_tsc_5qi_s {
+    uint8_t  five_qi;
+    uint8_t  priority;      /* Priority Level (lower = higher priority). */
+    uint16_t pdb_ms;        /* Packet Delay Budget, ms. */
+    uint8_t  per_scalar;    /* Packet Error Rate = per_scalar x 10^-per_exponent. */
+    uint8_t  per_exponent;
+    uint16_t mdbv;          /* Default Maximum Data Burst Volume, bytes. */
+    uint16_t avg_window_ms; /* Default Averaging Window, ms. */
+    uint16_t cn_pdb_ms;     /* Static CN PDB (UPF<->5G-AN), ms (NOTE 4/5/6). */
+} pcf_tsc_5qi_t;
+
+static const pcf_tsc_5qi_t pcf_tsc_5qi_table[] = {
+    /* 5QI prio pdb  per(s,e)  mdbv  avgw  cnpdb   (TS 23.501 R17 Table 5.7.4-1) */
+    {  82,  19,  10,  1, 4,    255,  2000,   1 }, /* Discrete Automation         */
+    {  83,  22,  10,  1, 4,    1354, 2000,   1 }, /* Discrete Automation / V2X   */
+    {  84,  24,  30,  1, 5,    1354, 2000,   5 }, /* Intelligent transport sys.  */
+    {  85,  21,  5,   1, 5,    255,  2000,   2 }, /* Electricity dist. high volt.*/
+    {  86,  18,  5,   1, 4,    1354, 2000,   2 }, /* V2X collision avoidance     */
+    /* 5QIs 87-90 are R18 additions (not in R17 Table 5.7.4-1).
+     * CN PDB and characteristics below are extrapolated and UNVERIFIED against
+     * R18 — verify against TS 23.501 R18 Table 5.7.4-1 before relying on them. */
+    {  87,  25,  5,   1, 3,    500,  2000,   1 }, /* Interactive - motion track. */
+    {  88,  25,  10,  1, 3,    1125, 2000,   1 }, /* Interactive - motion track. */
+    {  89,  25,  15,  1, 4,    17000,2000,   1 }, /* Visual content cloud/edge   */
+    {  90,  25,  20,  1, 4,    63000,2000,   1 }, /* Visual content cloud/edge   */
+};
+
+/* Fallback 5QI when the AF's tsnQos carries no usable requirement.
+ * 85 (delay-critical GBR, PDB 5ms) = the subscriber-provisioned Ethernet-session 5QI,
+ * so the AF-requested TSC flow folds onto the same QoS flow (no 84/85 split). */
+#define PCF_TSC_5QI_DEFAULT 85
+
+
 /* Map the AF's TsnQosContainer (TS 29.514 §5.6.2.35) to a standardized
  * delay-critical-GBR 5QI (PCF QoS mapping, TS 23.501 §5.28.4 / §5.27.3 point 5).
  * The PCF mapping table maps the TSN QoS information (priority / PDB / TSC burst

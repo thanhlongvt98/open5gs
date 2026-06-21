@@ -1990,7 +1990,9 @@ uint8_t smf_sess_set_ue_ip(smf_sess_t *sess)
         ogs_hash_set(smf_self()->ipv6_hash,
                 sess->ipv6->addr, OGS_IPV6_DEFAULT_PREFIX_LEN >> 3, sess);
     } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_ETHERNET) {
-        /* Ethernet PDU session (TS 23.501 §5.6.10.2): no UE IP address. */
+        /* Ethernet PDU session (TS 23.501 §5.6.10.2): no UE IP address is
+         * allocated. L2 reachability is handled by the UPF NW-TT bridge
+         * (MAC learning), and the N1 ACCEPT omits the PDU Address IE. */
         sess->ipv4 = NULL;
         sess->ipv6 = NULL;
     } else {
@@ -2177,7 +2179,14 @@ void smf_sess_remove(smf_sess_t *sess)
     if (sess->aaa_server_identifier.realm)
         ogs_free(sess->aaa_server_identifier.realm);
 
+    /* free SMF-local TSC context (no-op when sess->tsc NULL). */
     smf_sess_tsc_remove(sess);
+
+    /* /07: free the per-port PMIC blobs. */
+    if (sess->tsc_bridge.dstt_pmic)
+        ogs_free(sess->tsc_bridge.dstt_pmic);
+    if (sess->tsc_bridge.nwtt_pmic)
+        ogs_free(sess->tsc_bridge.nwtt_pmic);
 
     smf_bearer_remove_all(sess);
 
@@ -2370,8 +2379,23 @@ smf_bearer_t *smf_qos_flow_add(smf_sess_t *sess)
         ul_pdr->src_if_type = OGS_PFCP_3GPP_INTERFACE_TYPE_N3_3GPP_ACCESS;
 
     ul_pdr->outer_header_removal_len = 1;
-    ul_pdr->outer_header_removal.description =
-        OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IP;
+    if (sess->session.session_type == OGS_PDU_SESSION_TYPE_IPV4) {
+        ul_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IPV4;
+    } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_IPV6) {
+        ul_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IPV6;
+    } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_IPV4V6) {
+        ul_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IP;
+    } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_ETHERNET) {
+        /* Ethernet PDU session: strip GTP-U/UDP/IP, leave inner L2 frame. */
+        ul_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IP;
+    } else {
+        ogs_error("Invalid session_type [%d]", sess->session.session_type);
+        ogs_assert_if_reached();
+    }
 
     /* FAR */
     dl_far = ogs_pfcp_far_add(&sess->pfcp);
@@ -2575,8 +2599,24 @@ void smf_sess_create_indirect_data_forwarding(smf_sess_t *sess)
             OGS_PFCP_3GPP_INTERFACE_TYPE_SGW_UPF_GTP_U_FOR_UL_DATA_FORWARDING;
 
         pdr->outer_header_removal_len = 1;
-        pdr->outer_header_removal.description =
-            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IP;
+        if (sess->session.session_type == OGS_PDU_SESSION_TYPE_IPV4) {
+            pdr->outer_header_removal.description =
+                OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IPV4;
+        } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_IPV6) {
+            pdr->outer_header_removal.description =
+                OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IPV6;
+        } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_IPV4V6) {
+            pdr->outer_header_removal.description =
+                OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IP;
+        } else if (sess->session.session_type ==
+                OGS_PDU_SESSION_TYPE_ETHERNET) {
+            /* Ethernet PDU session: strip GTP-U/UDP/IP, leave inner L2 frame. */
+            pdr->outer_header_removal.description =
+                OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IP;
+        } else {
+            ogs_error("Invalid session_type [%d]", sess->session.session_type);
+            ogs_assert_if_reached();
+        }
 
         far = ogs_pfcp_far_add(&sess->pfcp);
         ogs_assert(far);
@@ -2759,8 +2799,23 @@ void smf_sess_create_cp_up_data_forwarding(smf_sess_t *sess)
     cp2up_pdr->src_if = OGS_PFCP_INTERFACE_CP_FUNCTION;
 
     cp2up_pdr->outer_header_removal_len = 1;
-    cp2up_pdr->outer_header_removal.description =
-        OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IP;
+    if (sess->session.session_type == OGS_PDU_SESSION_TYPE_IPV4) {
+        cp2up_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IPV4;
+    } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_IPV6) {
+        cp2up_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IPV6;
+    } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_IPV4V6) {
+        cp2up_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IP;
+    } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_ETHERNET) {
+        /* Ethernet PDU session: strip GTP-U/UDP/IP, leave inner L2 frame. */
+        cp2up_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IP;
+    } else {
+        ogs_error("Invalid session_type [%d]", sess->session.session_type);
+        ogs_assert_if_reached();
+    }
 
     up2cp_pdr = ogs_pfcp_pdr_add(&sess->pfcp);
     ogs_assert(up2cp_pdr);
@@ -2778,8 +2833,23 @@ void smf_sess_create_cp_up_data_forwarding(smf_sess_t *sess)
         up2cp_pdr->src_if_type = OGS_PFCP_3GPP_INTERFACE_TYPE_N3_3GPP_ACCESS;
 
     up2cp_pdr->outer_header_removal_len = 1;
-    up2cp_pdr->outer_header_removal.description =
-        OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IP;
+    if (sess->session.session_type == OGS_PDU_SESSION_TYPE_IPV4) {
+        up2cp_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IPV4;
+    } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_IPV6) {
+        up2cp_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IPV6;
+    } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_IPV4V6) {
+        up2cp_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IP;
+    } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_ETHERNET) {
+        /* Ethernet PDU session: strip GTP-U/UDP/IP, leave inner L2 frame. */
+        up2cp_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IP;
+    } else {
+        ogs_error("Invalid session_type [%d]", sess->session.session_type);
+        ogs_assert_if_reached();
+    }
 
     qos_flow = smf_default_bearer_in_sess(sess);
     ogs_assert(qos_flow);
@@ -2915,8 +2985,23 @@ smf_bearer_t *smf_bearer_add(smf_sess_t *sess)
     ul_pdr->src_if_type = OGS_PFCP_3GPP_INTERFACE_TYPE_N3_3GPP_ACCESS;
 
     ul_pdr->outer_header_removal_len = 1;
-    ul_pdr->outer_header_removal.description =
-        OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IP;
+    if (sess->session.session_type == OGS_PDU_SESSION_TYPE_IPV4) {
+        ul_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IPV4;
+    } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_IPV6) {
+        ul_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IPV6;
+    } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_IPV4V6) {
+        ul_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IP;
+    } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_ETHERNET) {
+        /* Ethernet PDU session: strip GTP-U/UDP/IP, leave inner L2 frame. */
+        ul_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IP;
+    } else {
+        ogs_error("Invalid session_type [%d]", sess->session.session_type);
+        ogs_assert_if_reached();
+    }
 
     /* FAR */
     dl_far = ogs_pfcp_far_add(&sess->pfcp);

@@ -54,6 +54,7 @@ typedef struct pcf_context_s {
 
     ogs_hash_t      *ipv4addr_hash;
     ogs_hash_t      *ipv6prefix_hash;
+    ogs_hash_t      *mac_addr_hash; /* 202606: MAC-keyed (Ethernet sessions) */
 
     pcf_qos_profile_t  qos_profile[OGS_PCF_MAX_NUM_OF_QOS_PROFILE];
     int                num_of_qos_profile;
@@ -166,6 +167,10 @@ struct pcf_sess_s {
 
     char *ipv4addr_string;
     char *ipv6prefix_string;
+    /* DS-TT MAC for Ethernet PDU sessions (no UE IP) — ueMac N5 bind. */
+    uint8_t mac_addr[6];
+    char *mac_addr48_string;
+    bool mac_register_pending; /* BSF MAC-register in flight; ack SMF update on resp */
 
     OpenAPI_list_t *ipv4_frame_route_list;
     OpenAPI_list_t *ipv6_frame_route_list;
@@ -240,6 +245,9 @@ pcf_sess_t *pcf_sess_find_by_dnn(pcf_ue_sm_t *pcf_ue_sm, char *dnn);
 pcf_sess_t *pcf_sess_find_by_ipv4addr(char *ipv4addr_string);
 pcf_sess_t *pcf_sess_find_by_ipv6addr(char *ipv6addr_string);
 pcf_sess_t *pcf_sess_find_by_ipv6prefix(char *ipv6prefix_string);
+/* MAC-keyed lookup for Ethernet sessions (ueMac N5 binding). */
+bool pcf_sess_set_mac_addr(pcf_sess_t *sess, char *mac_addr48_string);
+pcf_sess_t *pcf_sess_find_by_mac_addr(char *mac_addr48_string);
 int pcf_sessions_number_by_snssai_and_dnn(
         pcf_ue_sm_t *pcf_ue_sm, ogs_s_nssai_t *s_nssai, char *dnn);
 

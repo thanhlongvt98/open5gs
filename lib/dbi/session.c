@@ -132,7 +132,7 @@ int ogs_dbi_session_data(
                         if (!strcmp(child4_key, OGS_NAME_STRING) &&
                             BSON_ITER_HOLDS_UTF8(&child4_iter)) {
                             utf8 = bson_iter_utf8(&child4_iter, &length);
-                            if (ogs_strncasecmp(utf8, dnn, length) == 0) {
+                            if (ogs_strcasecmp(utf8, dnn) == 0) {
                                 found = true;
                                 goto done;
                             }

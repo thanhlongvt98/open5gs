@@ -676,8 +676,38 @@ typedef struct smf_sess_s {
     ogs_gtp_node_t  *gnode;
     ogs_pfcp_node_t *pfcp_node;
 
-    /* SMF-local TSC assistance state. NULL for baseline sessions. */
+    /* SMF-local TSC assistance state (Issue 6-B).
+     * NULL for baseline (non-TSC) sessions; allocated by smf_sess_tsc_add()
+     * when TSC assistance arrives (Step 2). Freed in smf_sess_remove(). */
     tsc_context_t   *tsc;
+
+    /* 5GS-TSN-bridge port state (TS 29.244 create/created
+     * bridge info for TSC). Set when the SMF requests a bridge port at PFCP
+     * establishment and the UPF returns the DS-TT port number. */
+    struct {
+        bool        bridge;       /* create_bridge_info_for_tsc was requested */
+        uint32_t    ds_tt_port;   /* assigned by the UPF (created_bridge_info) */
+        uint32_t    nw_tt_port;   /* NW-TT port (from the AF PMIC, Step 06)    */
+        /* /07: per-port PMIC (port management info container)
+         * received from the AF (N5->PCF->SMF) to push down to the TTs. Opaque
+         * managed-object blobs; freed in smf_sess_remove(). */
+        char       *dstt_pmic;    /* DS-TT PMIC -> N1 NAS (TS 24.501 9.11.4.27)*/
+        char       *nwtt_pmic;    /* NW-TT PMIC -> N4 PFCP (TS 29.244)         */
+        /* DS-TT *port* MAC: the assigned, globally-unique port identity supplied
+         * by the DS-TT over N1 in the PDU Session Establishment Request
+         * (TS 24.501 9.11.4.25, IEI 0x6E). Reported to the PCF as
+         * TsnBridgeInfo.dsttAddr. Per TS 23.501 5.28.1 NOTE 7 this is NOT a
+         * user-data MAC — it must never be confused with the end-station device
+         * MACs the UPF learns from UL traffic (those are the bridge FDB, relayed
+         * separately as learned MACs). */
+        uint8_t     ds_tt_port_mac[6];
+        bool        has_ds_tt_port_mac;
+        /* UE-DS-TT residence time, nanoseconds (TS 24.501 9.11.4.26, IEI 0x6F).
+         * The N1 IE carries the IEEE 1588-2019 correctionField (ns << 16); this
+         * field holds the decoded integer nanoseconds (correctionField >> 16). */
+        uint64_t    ds_tt_resid_time_ns;
+        bool        has_ds_tt_resid_time;
+    } tsc_bridge;
 
     ogs_pool_id_t smf_ue_id;
 
