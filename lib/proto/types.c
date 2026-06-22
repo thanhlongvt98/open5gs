@@ -1046,13 +1046,14 @@ static int flow_rx_to_gx(ogs_flow_t *rx_flow, ogs_flow_t *gx_flow)
         return OGS_ERROR;
     }
 
-    /* TSN Ethernet flow (TS 24.501 §9.11.4.13): structured L2 filter — preserve
-     * direction and copy eth_content through to the PCC rule. */
-    if (rx_flow->is_eth) {
+    /* TSN Ethernet packet filter sentinel (TS 24.501 §9.11.4.13): not an IPFW
+     * "permit in/out" rule — preserve the direction the AF set and pass the
+     * description through unchanged so the SMF builds an Ethernet
+     * ogs_pf_content_t for the NAS QoS rule (see src/smf/binding.c). */
+    if (!strncmp(rx_flow->description, "eth|", strlen("eth|"))) {
         gx_flow->direction = rx_flow->direction;
-        gx_flow->is_eth = true;
-        gx_flow->description = NULL;
-        gx_flow->eth_content = rx_flow->eth_content;
+        gx_flow->description = ogs_strdup(rx_flow->description);
+        ogs_assert(gx_flow->description);
 
     } else if (!strncmp(rx_flow->description,
                 "permit out", strlen("permit out"))) {
@@ -1234,7 +1235,11 @@ int ogs_pcc_rule_update_qos_from_media(
         ogs_media_sub_component_t *sub = &media_component->sub[i];
         /* Guard against double-counting: for TSN Ethernet sub-components the
          * PCF appends both the real data EthFlowDescription AND a gPTP
-         * catch-all flow (ethType 88F7), both BIDIRECTIONAL. */
+         * catch-all flow (eth|-|-|-|-|88f7), both BIDIRECTIONAL.  The
+         * media-component bandwidth (GBR == MBR, DL == UL for TSC per
+         * TS 26.114 §6.3) must be accumulated exactly once per sub-component,
+         * not once per BIDIRECTIONAL flow.  Reset the flag for every new
+         * sub-component so unrelated sub-components are still accumulated. */
         bool bidir_counted = false;
 
         for (j = 0; j < sub->num_of_flow &&
@@ -1330,7 +1335,7 @@ int ogs_pcc_rule_update_qos_from_media(
                  * Only the FIRST BIDIRECTIONAL flow in this sub-component may
                  * accumulate bandwidth.  The TSN AF adds both the real data
                  * EthFlowDescription and a gPTP catch-all flow
-                 * (ethType 88F7) to the same sub, both BIDIRECTIONAL.
+                 * (eth|-|-|-|-|88f7) to the same sub, both BIDIRECTIONAL.
                  * Running the four += lines for every BIDIRECTIONAL flow would
                  * double (or more) the media-component bandwidth on each
                  * iteration.  The IMS "one flow sets the QoS" semantics apply:
@@ -1339,7 +1344,7 @@ int ogs_pcc_rule_update_qos_from_media(
                  * Assumes the real data EthFlowDescription precedes any
                  * catch-all flow in the sub-component, which matches current
                  * TSN AF ordering. */
-                if ((gx_flow.is_eth || gx_flow.description) && !bidir_counted) {
+                if (gx_flow.description && !bidir_counted) {
                     pcc_rule->qos.mbr.downlink +=
                         media_component->max_requested_bandwidth_dl;
                     pcc_rule->qos.gbr.downlink +=
@@ -1376,8 +1381,8 @@ int ogs_pcc_rule_update_qos_from_media(
     if (pcc_rule->qos.gbr.uplink == 0)
         pcc_rule->qos.gbr.uplink = pcc_rule->qos.mbr.uplink;
 
-    /* Carry TSCAI assistance from the media component onto the PCC
-     * rule, so it is emitted on the SmPolicyDecision toward the SMF. */
+    /* Carry TSCAI assistance from the media component onto the PCC rule, so it
+     * is emitted on the SmPolicyDecision toward the SMF. */
     pcc_rule->tscai_input_dl = media_component->tscai_input_dl;
     pcc_rule->tscai_input_ul = media_component->tscai_input_ul;
 

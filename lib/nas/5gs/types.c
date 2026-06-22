@@ -1040,62 +1040,62 @@ static int parse_qos_rules_packet_filter_list(
                     be16toh(rule->pf[i].content.component[j].port.high);
                 len += sizeof(rule->pf[i].content.component[j].port.high);
                 break;
-            /* Ethernet packet filter components (TS 24.501 R17 §9.11.4.13) */
-            case OGS_PACKET_FILTER_DESTINATION_MAC_ADDRESS_TYPE:
-            case OGS_PACKET_FILTER_SOURCE_MAC_ADDRESS_TYPE:
-                if (size+len+
-                    sizeof(rule->pf[i].content.component[j].mac) > length) {
-                    ogs_error("Overflow : size[%d] len[%d] length[%d]",
-                            size, len, length);
-                    goto cleanup;
-                }
-                memcpy(rule->pf[i].content.component[j].mac,
-                    buffer+size+len,
-                    sizeof(rule->pf[i].content.component[j].mac));
-                len += sizeof(rule->pf[i].content.component[j].mac);
-                break;
-            case OGS_PACKET_FILTER_8021Q_C_TAG_VID_TYPE:
-                if (size+len+
-                    sizeof(rule->pf[i].content.component[j].vid) > length) {
-                    ogs_error("Overflow : size[%d] len[%d] length[%d]",
-                            size, len, length);
-                    goto cleanup;
-                }
-                memcpy(&rule->pf[i].content.component[j].vid,
-                    buffer+size+len,
-                    sizeof(rule->pf[i].content.component[j].vid));
-                rule->pf[i].content.component[j].vid =
-                    be16toh(rule->pf[i].content.component[j].vid) & 0x0fff;
-                len += sizeof(rule->pf[i].content.component[j].vid);
-                break;
-            case OGS_PACKET_FILTER_8021Q_C_TAG_PCP_DEI_TYPE:
-                if (size+len+
-                    sizeof(rule->pf[i].content.component[j].pcp_dei) >
-                        length) {
-                    ogs_error("Overflow : size[%d] len[%d] length[%d]",
-                            size, len, length);
-                    goto cleanup;
-                }
-                memcpy(&rule->pf[i].content.component[j].pcp_dei,
-                    buffer+size+len,
-                    sizeof(rule->pf[i].content.component[j].pcp_dei));
-                len += sizeof(rule->pf[i].content.component[j].pcp_dei);
-                break;
-            case OGS_PACKET_FILTER_ETHERTYPE_TYPE:
-                if (size+len+
-                    sizeof(rule->pf[i].content.component[j].ethertype) >
-                        length) {
-                    ogs_error("Overflow : size[%d] len[%d] length[%d]",
-                            size, len, length);
-                    goto cleanup;
-                }
-                memcpy(&rule->pf[i].content.component[j].ethertype,
-                    buffer+size+len,
-                    sizeof(rule->pf[i].content.component[j].ethertype));
-                rule->pf[i].content.component[j].ethertype =
-                    be16toh(rule->pf[i].content.component[j].ethertype);
-                len += sizeof(rule->pf[i].content.component[j].ethertype);
-                break;
+                /* Ethernet packet filter components (TS 24.501 R17 §9.11.4.13) */
+                case OGS_PACKET_FILTER_DESTINATION_MAC_ADDRESS_TYPE:
+                case OGS_PACKET_FILTER_SOURCE_MAC_ADDRESS_TYPE:
+                    if (size+len+
+                        sizeof(rule->pf[i].content.component[j].mac) > length) {
+                        ogs_error("Overflow : size[%d] len[%d] length[%d]",
+                                size, len, length);
+                        goto cleanup;
+                    }
+                    memcpy(rule->pf[i].content.component[j].mac,
+                        buffer+size+len,
+                        sizeof(rule->pf[i].content.component[j].mac));
+                    len += sizeof(rule->pf[i].content.component[j].mac);
+                    break;
+                case OGS_PACKET_FILTER_8021Q_C_TAG_VID_TYPE:
+                    if (size+len+
+                        sizeof(rule->pf[i].content.component[j].vid) > length) {
+                        ogs_error("Overflow : size[%d] len[%d] length[%d]",
+                                size, len, length);
+                        goto cleanup;
+                    }
+                    memcpy(&rule->pf[i].content.component[j].vid,
+                        buffer+size+len,
+                        sizeof(rule->pf[i].content.component[j].vid));
+                    rule->pf[i].content.component[j].vid =
+                        be16toh(rule->pf[i].content.component[j].vid) & 0x0fff;
+                    len += sizeof(rule->pf[i].content.component[j].vid);
+                    break;
+                case OGS_PACKET_FILTER_8021Q_C_TAG_PCP_DEI_TYPE:
+                    if (size+len+
+                        sizeof(rule->pf[i].content.component[j].pcp_dei) >
+                            length) {
+                        ogs_error("Overflow : size[%d] len[%d] length[%d]",
+                                size, len, length);
+                        goto cleanup;
+                    }
+                    memcpy(&rule->pf[i].content.component[j].pcp_dei,
+                        buffer+size+len,
+                        sizeof(rule->pf[i].content.component[j].pcp_dei));
+                    len += sizeof(rule->pf[i].content.component[j].pcp_dei);
+                    break;
+                case OGS_PACKET_FILTER_ETHERTYPE_TYPE:
+                    if (size+len+
+                        sizeof(rule->pf[i].content.component[j].ethertype) >
+                            length) {
+                        ogs_error("Overflow : size[%d] len[%d] length[%d]",
+                                size, len, length);
+                        goto cleanup;
+                    }
+                    memcpy(&rule->pf[i].content.component[j].ethertype,
+                        buffer+size+len,
+                        sizeof(rule->pf[i].content.component[j].ethertype));
+                    rule->pf[i].content.component[j].ethertype =
+                        be16toh(rule->pf[i].content.component[j].ethertype);
+                    len += sizeof(rule->pf[i].content.component[j].ethertype);
+                    break;
             default:
                 ogs_error("PF[%d] Unknown Packet Filter Type(%d)",
                           i, rule->pf[i].content.component[j].type);

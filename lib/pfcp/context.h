@@ -218,8 +218,6 @@ typedef struct ogs_pfcp_pdr_s {
         };
         char *description;
         uint32_t sdf_filter_id;
-        bool is_eth;
-        ogs_pf_content_t eth_content;
     } flow[OGS_MAX_NUM_OF_FLOW_IN_PDR];;
 
     ogs_list_t              rule_list;      /* Rule List */
@@ -407,8 +405,11 @@ ED6(uint8_t     spare1:3;,
     ogs_ipfw_rule_t ipfw;
     uint32_t sdf_filter_id;
 
-    /* TSN Ethernet packet filter (TS 24.501 §9.11.4.13 / TS 29.244 §8.2.132):
-     * L2 filter carried via the PFCP Ethernet Packet Filter IE. */
+    /* TSN Ethernet packet filter (TS 24.501 §9.11.4.13): when the SDF
+     * Flow-Description is the "eth|..." sentinel, the rule carries an L2
+     * filter (dst/src MAC, C-TAG VID/PCP, EtherType) instead of an IPFW IP
+     * rule. The UPF matches DL frames against this to steer the TSN stream
+     * onto its dedicated QoS flow (DRB/QFI). */
     bool is_eth;
     ogs_pf_content_t eth_content;
 

@@ -36,7 +36,6 @@ testunit_unit_exe = executable('unit',
                     libgtp_dep,
                     libngap_dep,
                     libnas_eps_dep,
-                    libpfcp_dep,
                     libsbi_dep])
 
 test('unit', testunit_unit_exe, is_parallel : false, suite: 'unit')

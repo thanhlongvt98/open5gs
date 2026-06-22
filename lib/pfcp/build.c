@@ -309,9 +309,6 @@ static struct {
     ogs_pfcp_f_teid_t f_teid;
     char dnn[OGS_MAX_DNN_LEN+1];
     char *sdf_filter[OGS_MAX_NUM_OF_FLOW_IN_PDR];
-    uint8_t eth_mac[16];
-    uint8_t ethertype[2];
-    uint8_t c_tag[3];
 } pdrbuf[OGS_MAX_NUM_OF_PDR];
 
 void ogs_pfcp_pdrbuf_init(void)
@@ -326,164 +323,6 @@ void ogs_pfcp_pdrbuf_clear(void)
         for (j = 0; j < OGS_MAX_NUM_OF_FLOW_IN_PDR; j++) {
             if (pdrbuf[i].sdf_filter[j])
                 ogs_free(pdrbuf[i].sdf_filter[j]);
-        }
-    }
-}
-
-/* Build the PFCP Ethernet Packet Filter IE (TS 29.244 §8.2.132) from an
- * ogs_pf_content_t (TS 24.501 §9.11.4.13 component types). */
-void ogs_pfcp_build_ethernet_packet_filter(
-        ogs_pfcp_tlv_ethernet_packet_filter_t *message,
-        ogs_pf_content_t *content, int pdrbuf_idx)
-{
-    uint8_t mac_buf[16];
-    uint8_t c_tag[3];
-    uint16_t ethertype_be;
-    int i, mac_len = 0;
-    uint8_t mac_flags = 0;
-    uint8_t dst_mac[6] = {0}, src_mac[6] = {0};
-    bool has_dst = false, has_src = false, has_ctag = false, has_ethertype = false;
-    uint16_t vid = 0;
-    uint8_t pcp_dei = 0;
-
-    ogs_assert(message);
-    ogs_assert(content);
-
-    memset(message, 0, sizeof(*message));
-    message->presence = 1;
-
-    for (i = 0; i < content->num_of_component; i++) {
-        switch (content->component[i].type) {
-        case OGS_PACKET_FILTER_DESTINATION_MAC_ADDRESS_TYPE:
-            memcpy(dst_mac, content->component[i].mac, 6);
-            has_dst = true;
-            break;
-        case OGS_PACKET_FILTER_SOURCE_MAC_ADDRESS_TYPE:
-            memcpy(src_mac, content->component[i].mac, 6);
-            has_src = true;
-            break;
-        case OGS_PACKET_FILTER_8021Q_C_TAG_VID_TYPE:
-            vid = content->component[i].vid;
-            has_ctag = true;
-            break;
-        case OGS_PACKET_FILTER_8021Q_C_TAG_PCP_DEI_TYPE:
-            pcp_dei = content->component[i].pcp_dei;
-            has_ctag = true;
-            break;
-        case OGS_PACKET_FILTER_ETHERTYPE_TYPE:
-            ethertype_be = htobe16(content->component[i].ethertype);
-            has_ethertype = true;
-            break;
-        default:
-            break;
-        }
-    }
-
-    if (has_src)
-        mac_flags |= 0x01; /* SOD */
-    if (has_dst)
-        mac_flags |= 0x02; /* DOD */
-
-    if (has_dst || has_src) {
-        mac_buf[mac_len++] = mac_flags;
-        if (has_dst)
-            memcpy(mac_buf + mac_len, dst_mac, 6), mac_len += 6;
-        if (has_src)
-            memcpy(mac_buf + mac_len, src_mac, 6), mac_len += 6;
-        message->mac_address.presence = 1;
-        memcpy(pdrbuf[pdrbuf_idx].eth_mac, mac_buf, mac_len);
-        message->mac_address.data = pdrbuf[pdrbuf_idx].eth_mac;
-        message->mac_address.len = mac_len;
-    }
-
-    if (has_ethertype) {
-        message->ethertype.presence = 1;
-        memcpy(pdrbuf[pdrbuf_idx].ethertype, &ethertype_be, 2);
-        message->ethertype.data = pdrbuf[pdrbuf_idx].ethertype;
-        message->ethertype.len = 2;
-    }
-
-    if (has_ctag) {
-        uint32_t tci = ((pcp_dei >> 1) & 0x7) << 13;
-        tci |= (vid & 0x0fff);
-        c_tag[0] = (tci >> 16) & 0xff;
-        c_tag[1] = (tci >> 8) & 0xff;
-        c_tag[2] = tci & 0xff;
-        message->c_tag.presence = 1;
-        memcpy(pdrbuf[pdrbuf_idx].c_tag, c_tag, 3);
-        message->c_tag.data = pdrbuf[pdrbuf_idx].c_tag;
-        message->c_tag.len = 3;
-    }
-}
-
-/* Parse PFCP Ethernet Packet Filter IE into ogs_pf_content_t. */
-void ogs_pfcp_parse_ethernet_packet_filter(
-        ogs_pf_content_t *content,
-        ogs_pfcp_tlv_ethernet_packet_filter_t *message)
-{
-    int n = 0;
-    int c;
-
-    ogs_assert(content);
-    ogs_assert(message);
-    memset(content, 0, sizeof(*content));
-
-    if (message->mac_address.presence && message->mac_address.len >= 1) {
-        const uint8_t *p = message->mac_address.data;
-        uint8_t flags = p[0];
-        int off = 1;
-        if (flags & 0x02) { /* DOD */
-            if (off + 6 <= (int)message->mac_address.len) {
-                content->component[n].type =
-                    OGS_PACKET_FILTER_DESTINATION_MAC_ADDRESS_TYPE;
-                memcpy(content->component[n].mac, p + off, 6);
-                n++; off += 6;
-            }
-        }
-        if (flags & 0x01) { /* SOD */
-            if (off + 6 <= (int)message->mac_address.len) {
-                content->component[n].type =
-                    OGS_PACKET_FILTER_SOURCE_MAC_ADDRESS_TYPE;
-                memcpy(content->component[n].mac, p + off, 6);
-                n++; off += 6;
-            }
-        }
-    }
-
-    if (message->ethertype.presence && message->ethertype.len >= 2) {
-        uint16_t et;
-        memcpy(&et, message->ethertype.data, 2);
-        content->component[n].type = OGS_PACKET_FILTER_ETHERTYPE_TYPE;
-        content->component[n].ethertype = be16toh(et);
-        n++;
-    }
-
-    if (message->c_tag.presence && message->c_tag.len >= 3) {
-        const uint8_t *p = message->c_tag.data;
-        uint32_t tci = ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
-        content->component[n].type = OGS_PACKET_FILTER_8021Q_C_TAG_VID_TYPE;
-        content->component[n].vid = tci & 0x0fff;
-        n++;
-        content->component[n].type = OGS_PACKET_FILTER_8021Q_C_TAG_PCP_DEI_TYPE;
-        content->component[n].pcp_dei =
-            (uint8_t)(((tci >> 13) & 0x7) << 1);
-        n++;
-    }
-
-    content->num_of_component = (uint8_t)n;
-    content->length = 0;
-    for (c = 0; c < n; c++) {
-        content->length += 1;
-        switch (content->component[c].type) {
-        case OGS_PACKET_FILTER_DESTINATION_MAC_ADDRESS_TYPE:
-        case OGS_PACKET_FILTER_SOURCE_MAC_ADDRESS_TYPE:
-            content->length += 6; break;
-        case OGS_PACKET_FILTER_8021Q_C_TAG_VID_TYPE:
-        case OGS_PACKET_FILTER_ETHERTYPE_TYPE:
-            content->length += 2; break;
-        case OGS_PACKET_FILTER_8021Q_C_TAG_PCP_DEI_TYPE:
-            content->length += 1; break;
-        default: break;
         }
     }
 }
@@ -530,13 +369,6 @@ void ogs_pfcp_build_create_pdr(
 
     memset(pfcp_sdf_filter, 0, sizeof(pfcp_sdf_filter));
     for (j = 0; j < pdr->num_of_flow && j < OGS_MAX_NUM_OF_FLOW_IN_PDR; j++) {
-        if (pdr->flow[j].is_eth) {
-            ogs_pfcp_build_ethernet_packet_filter(
-                    &message->pdi.ethernet_packet_filter,
-                    &pdr->flow[j].eth_content, i);
-            continue;
-        }
-
         ogs_assert(pdr->flow[j].fd || pdr->flow[j].bid);
 
         if (pdr->flow[j].fd) {
@@ -695,13 +527,6 @@ void ogs_pfcp_build_update_pdr(
 
         memset(pfcp_sdf_filter, 0, sizeof(pfcp_sdf_filter));
         for (j = 0; j < pdr->num_of_flow && j < OGS_MAX_NUM_OF_FLOW_IN_PDR; j++) {
-            if (pdr->flow[j].is_eth) {
-                ogs_pfcp_build_ethernet_packet_filter(
-                        &message->pdi.ethernet_packet_filter,
-                        &pdr->flow[j].eth_content, i);
-                continue;
-            }
-
             ogs_assert(pdr->flow[j].fd || pdr->flow[j].bid);
 
             if (pdr->flow[j].fd) {

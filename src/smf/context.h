@@ -676,9 +676,9 @@ typedef struct smf_sess_s {
     ogs_gtp_node_t  *gnode;
     ogs_pfcp_node_t *pfcp_node;
 
-    /* SMF-local TSC assistance state (Issue 6-B).
-     * NULL for baseline (non-TSC) sessions; allocated by smf_sess_tsc_add()
-     * when TSC assistance arrives (Step 2). Freed in smf_sess_remove(). */
+    /* SMF-local TSC assistance state. NULL for baseline (non-TSC) sessions;
+     * allocated by smf_sess_tsc_add() when TSC assistance arrives from the PCF.
+     * Freed in smf_sess_remove(). */
     tsc_context_t   *tsc;
 
     /* 5GS-TSN-bridge port state (TS 29.244 create/created
@@ -687,10 +687,10 @@ typedef struct smf_sess_s {
     struct {
         bool        bridge;       /* create_bridge_info_for_tsc was requested */
         uint32_t    ds_tt_port;   /* assigned by the UPF (created_bridge_info) */
-        uint32_t    nw_tt_port;   /* NW-TT port (from the AF PMIC, Step 06)    */
-        /* /07: per-port PMIC (port management info container)
-         * received from the AF (N5->PCF->SMF) to push down to the TTs. Opaque
-         * managed-object blobs; freed in smf_sess_remove(). */
+        uint32_t    nw_tt_port;   /* NW-TT port (from the AF PMIC)            */
+        /* Per-port PMIC (port management info container) received from the AF
+         * (N5->PCF->SMF) to push down to the TTs. Opaque managed-object blobs;
+         * freed in smf_sess_remove(). */
         char       *dstt_pmic;    /* DS-TT PMIC -> N1 NAS (TS 24.501 9.11.4.27)*/
         char       *nwtt_pmic;    /* NW-TT PMIC -> N4 PFCP (TS 29.244)         */
         /* DS-TT *port* MAC: the assigned, globally-unique port identity supplied

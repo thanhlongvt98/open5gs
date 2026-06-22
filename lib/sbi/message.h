@@ -529,7 +529,7 @@ typedef struct ogs_sbi_message_s {
 
         char *ipv4addr;
         char *ipv6prefix;
-        char *mac_addr; /* 202606: macAddr48 (BSF pcfBindings discovery) */
+        char *mac_addr; /* macAddr48 (BSF pcfBindings discovery) */
 
         bool home_plmn_id_presence;
         ogs_plmn_id_t home_plmn_id;

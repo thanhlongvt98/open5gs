@@ -606,28 +606,45 @@ void ogs_pf_content_from_ipfw_rule(
 }
 
 /*
- * ogs_pf_content_from_eth_fields - populate an ogs_pf_content_t from structured
- * Ethernet filter fields (TS 24.501 §9.11.4.13).
+ * ogs_pf_content_from_eth_sentinel - parse the TSN Ethernet packet-filter
+ * sentinel string and populate an ogs_pf_content_t (TS 24.501 §9.11.4.13).
  *
- * Each field pointer may be NULL or "-" when absent. MACs accept ':' or '-'
- * as octet separator. vid and ethertype are stored host-order; NAS/PFCP
- * encoders byte-swap them. pcp_dei is stored as (pcp << 1) with DEI=0.
+ * Sentinel format:
+ *   "eth|<dstMAC>|<srcMAC>|<vid>|<pcp>|<ethertypeHex>"
+ * Each field is "-" when absent. MACs accept ':' or '-' as octet separator.
+ * vid and ethertype are stored host-order; the NAS encoder byte-swaps them.
+ * pcp_dei is stored as (pcp << 1) with DEI=0; the UE compares the low nibble.
  */
-void ogs_pf_content_from_eth_fields(
-        const char *dst_mac, const char *src_mac,
-        const char *vid_str, const char *pcp_str, const char *eth_type,
-        ogs_pf_content_t *content)
+void ogs_pf_content_from_eth_sentinel(
+        const char *desc, ogs_pf_content_t *content)
 {
+    char buf[128];
+    char *fields[6];
+    char *p, *tok;
     int n = 0, i;
 
+    ogs_assert(desc);
     ogs_assert(content);
+
     memset(content, 0, sizeof(*content));
 
+    /* Copy so we can tokenise in-place; skip the leading "eth|" sentinel */
+    ogs_snprintf(buf, sizeof(buf), "%s", desc + 4); /* +4 skips "eth|" */
+    p = buf;
+    for (i = 0; i < 6; i++) {
+        if (!p) { fields[i] = NULL; continue; } /* fewer than 6 fields: don't strchr(NULL) */
+        tok = p;
+        p = strchr(p, '|');
+        if (p) { *p = '\0'; p++; }
+        fields[i] = tok;
+    }
+
     /* dst MAC */
-    if (dst_mac && dst_mac[0] && strcmp(dst_mac, "-") != 0) {
+    if (fields[0] && strcmp(fields[0], "-") != 0) {
         unsigned int b[6];
+        /* Accept ':' or '-' as separator by replacing '-' with ':' first */
         char mac_buf[18];
-        ogs_snprintf(mac_buf, sizeof(mac_buf), "%s", dst_mac);
+        ogs_snprintf(mac_buf, sizeof(mac_buf), "%s", fields[0]);
         for (i = 0; i < (int)strlen(mac_buf); i++)
             if (mac_buf[i] == '-') mac_buf[i] = ':';
         if (sscanf(mac_buf, "%2x:%2x:%2x:%2x:%2x:%2x",
@@ -640,10 +657,10 @@ void ogs_pf_content_from_eth_fields(
         }
     }
     /* src MAC */
-    if (src_mac && src_mac[0] && strcmp(src_mac, "-") != 0) {
+    if (fields[1] && strcmp(fields[1], "-") != 0) {
         unsigned int b[6];
         char mac_buf[18];
-        ogs_snprintf(mac_buf, sizeof(mac_buf), "%s", src_mac);
+        ogs_snprintf(mac_buf, sizeof(mac_buf), "%s", fields[1]);
         for (i = 0; i < (int)strlen(mac_buf); i++)
             if (mac_buf[i] == '-') mac_buf[i] = ':';
         if (sscanf(mac_buf, "%2x:%2x:%2x:%2x:%2x:%2x",
@@ -655,33 +672,36 @@ void ogs_pf_content_from_eth_fields(
             n++;
         }
     }
-    /* C-TAG VID */
-    if (vid_str && vid_str[0] && strcmp(vid_str, "-") != 0) {
+    /* C-TAG VID (host-order; encoder masks + byteswaps to 12-bit BE) */
+    if (fields[2] && strcmp(fields[2], "-") != 0) {
         content->component[n].type = OGS_PACKET_FILTER_8021Q_C_TAG_VID_TYPE;
-        content->component[n].vid = (uint16_t)atoi(vid_str);
+        content->component[n].vid = (uint16_t)atoi(fields[2]);
         n++;
     }
-    /* C-TAG PCP/DEI */
-    if (pcp_str && pcp_str[0] && strcmp(pcp_str, "-") != 0) {
+    /* C-TAG PCP/DEI: PCP in bits[3:1], DEI=0 in bit[0] (TS 24.501 Table 9.11.4.13.1) */
+    if (fields[3] && strcmp(fields[3], "-") != 0) {
         content->component[n].type =
             OGS_PACKET_FILTER_8021Q_C_TAG_PCP_DEI_TYPE;
         content->component[n].pcp_dei =
-            (uint8_t)((atoi(pcp_str) & 0x7) << 1);
+            (uint8_t)((atoi(fields[3]) & 0x7) << 1);
         n++;
     }
-    /* EtherType */
-    if (eth_type && eth_type[0] && strcmp(eth_type, "-") != 0) {
+    /* EtherType (host-order; encoder byteswaps) */
+    if (fields[4] && strcmp(fields[4], "-") != 0) {
         content->component[n].type = OGS_PACKET_FILTER_ETHERTYPE_TYPE;
         content->component[n].ethertype =
-            (uint16_t)strtol(eth_type, NULL, 16);
+            (uint16_t)strtol(fields[4], NULL, 16);
         n++;
     }
 
     content->num_of_component = (uint8_t)n;
+    /* On-wire packet-filter content length (TS 24.501 §9.11.4.13): the NAS
+     * encoder writes content.length as the BYTE count of all components
+     * (1 type octet + fixed value per component), NOT the component count. */
     {
         uint8_t bytelen = 0, c;
         for (c = 0; c < (uint8_t)n; c++) {
-            bytelen += 1;
+            bytelen += 1; /* component type octet */
             switch (content->component[c].type) {
             case OGS_PACKET_FILTER_DESTINATION_MAC_ADDRESS_TYPE:
             case OGS_PACKET_FILTER_SOURCE_MAC_ADDRESS_TYPE:

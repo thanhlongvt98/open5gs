@@ -54,7 +54,8 @@ ogs_socket_t ogs_tun_open(char *ifname, int len, int is_tap)
 
     memset(&ifr, 0, sizeof(ifr));
 
-    ifr.ifr_flags = (is_tap ? (flags | IFF_TAP) : (flags | IFF_TUN));
+    /* IFF_MULTI_QUEUE enables taprio on the TAP (taprio requires multi-queue). */
+    ifr.ifr_flags = (is_tap ? (flags | IFF_TAP | IFF_MULTI_QUEUE) : (flags | IFF_TUN));
     strncpy(ifr.ifr_name, ifname, IFNAMSIZ-1);
 
     rc = ioctl(fd, TUNSETIFF, (void *)&ifr);
