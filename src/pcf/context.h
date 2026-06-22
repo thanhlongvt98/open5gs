@@ -54,7 +54,7 @@ typedef struct pcf_context_s {
 
     ogs_hash_t      *ipv4addr_hash;
     ogs_hash_t      *ipv6prefix_hash;
-    ogs_hash_t      *mac_addr_hash; /* 202606: MAC-keyed (Ethernet sessions) */
+    ogs_hash_t      *mac_addr_hash; /* MAC-keyed PCF bindings (Ethernet sessions) */
 
     pcf_qos_profile_t  qos_profile[OGS_PCF_MAX_NUM_OF_QOS_PROFILE];
     int                num_of_qos_profile;

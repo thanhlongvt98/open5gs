@@ -64,7 +64,6 @@ bool pcf_sbi_send_tsn_bridge_new_bridge(
         int bridge_id, int ds_tt_port, const char *ds_tt_mac,
         bool has_resid_time, int resid_time_ns);
 
-
 #ifdef __cplusplus
 }
 #endif
