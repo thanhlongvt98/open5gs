@@ -121,13 +121,13 @@ static bool _get_vlan(const uint8_t *data, uint len, uint16_t *vid, uint8_t *pcp
     return true;
 }
 
-/* UPF-local Ethernet fast-path classification (observability only). */
-#define UPF_MAC_ALEN 6
+/* UPF-local Ethernet fast-path classification (observability only).
+ * Runs only for Ethernet PDU sessions (sess->correlation.ethernet). */
 #define ETHERTYPE_GPTP 0x88F7  /* IEEE 802.1AS / 1588 gPTP (TS 23.501 §5.27.1.2.2.1) */
 
 typedef enum {
     UPF_ETH_CLASS_HIT,           /* Ethernet frame on a matched PDR */
-    UPF_ETH_CLASS_MISS,          /* matched PDR, no stream binding */
+    UPF_ETH_CLASS_MISS,          /* matched PDR, no stream binding configured */
     UPF_ETH_CLASS_NO_PDR_MATCH,  /* session known (N3 TEID) but no PDR/filter hit */
     UPF_ETH_CLASS_GPTP,          /* EtherType 0x88F7 -> NW-TT gPTP path */
 } upf_eth_class_t;
@@ -141,12 +141,6 @@ static const char *upf_eth_class_str(upf_eth_class_t c)
     case UPF_ETH_CLASS_GPTP:         return "GPTP";
     default:                         return "UNKNOWN";
     }
-}
-
-/* True when the PDU session carries no UE IP (Ethernet session type). */
-static bool upf_sess_is_ethernet(const upf_sess_t *sess)
-{
-    return sess && !sess->ipv4 && !sess->ipv6;
 }
 
 /* NW-TT MAC-learning bridge (TS 23.501 §5.8.2.5.3).
@@ -308,39 +302,30 @@ static bool upf_eth_dl_forward(upf_sess_t *sess, ogs_pkbuf_t *pkbuf)
     return true;
 }
 
-/* Pick the Ethernet PDU session whose DL eth filter matches this frame.
- * Falls back to the first eth session with only match-all PDRs when no eth
- * filter hits (single-session testbed). */
-static upf_sess_t *upf_eth_find_session_for_dl(const uint8_t *data, uint len)
-{
-    upf_sess_t *sess = NULL;
-    upf_sess_t *fallback_sess = NULL;
-
-    ogs_list_for_each(&upf_self()->sess_list, sess) {
-        ogs_pfcp_pdr_t *pdr = NULL;
-        bool has_eth_pdr = false;
-
-        if (!upf_sess_is_ethernet(sess))
-            continue;
-
-        ogs_list_for_each(&sess->pfcp.pdr_list, pdr) {
-            if (pdr->src_if != OGS_PFCP_INTERFACE_CORE)
-                continue;
-            if (upf_pdr_has_eth_rule(pdr)) {
-                has_eth_pdr = true;
-                if (upf_eth_pdr_matches(pdr, (uint8_t *)data, len, true))
-                    return sess;
-            }
-        }
-        if (!has_eth_pdr && !fallback_sess)
-            fallback_sess = sess;
-    }
-    return fallback_sess;
-}
-
 /* Flood a DL broadcast/multicast L2 frame to every active Ethernet PDU session
  * (TS 23.501 §5.8.2.5.3). Each session gets its own copy. Returns true if at
  * least one Ethernet session was found (the caller then frees the original). */
+/* NW-TT 802.1Qbv gate: returns true (=> drop) when a VLAN-tagged frame's PCP is not
+ * in this session's gate allowed-PCP set programmed by the PMIC (TS 23.501 §5.28.3;
+ * IEEE 802.1Q §8.6.8.4). Untagged frames and sessions with no parsed gate pass. The
+ * PMIC gate is per-traffic-class/PCP; the strict per-cycle time window is a later
+ * refinement gated on gate-synchronized talkers. */
+static bool upf_nwtt_gate_blocks(const upf_sess_t *sess, ogs_pkbuf_t *pkbuf,
+        const char *dir)
+{
+    uint16_t vid = 0;
+    uint8_t pcp = 0;
+    if (!sess || !sess->nwtt.gate_pcp_mask)
+        return false;
+    if (!_get_vlan(pkbuf->data, pkbuf->len, &vid, &pcp))
+        return false;
+    if ((sess->nwtt.gate_pcp_mask >> pcp) & 0x1)
+        return false;
+    ogs_info("[UPF] NW-TT gate DROP %s vid[%u] pcp[%u] (allowed mask[0x%02x])",
+             dir, vid, pcp, sess->nwtt.gate_pcp_mask);
+    return true;
+}
+
 static bool upf_eth_dl_flood(ogs_pkbuf_t *pkbuf)
 {
     upf_sess_t *sess = NULL;
@@ -348,9 +333,12 @@ static bool upf_eth_dl_flood(ogs_pkbuf_t *pkbuf)
 
     ogs_list_for_each(&upf_self()->sess_list, sess) {
         ogs_pkbuf_t *clone = NULL;
-        if (!upf_sess_is_ethernet(sess))
+        if (!sess->correlation.ethernet)
             continue;
         any = true;
+        /* NW-TT DL gate: skip this session if the frame's PCP is gated out. */
+        if (upf_nwtt_gate_blocks(sess, pkbuf, "DL-flood"))
+            continue;
         clone = ogs_pkbuf_copy(pkbuf);
         if (!clone)
             continue;
@@ -401,16 +389,27 @@ static void _gtpv1_tun_recv_common_cb(
                          group_addr ? "(flood)" : "(unicast)");
 
             if (!group_addr) {
-                upf_sess_t *esess = upf_eth_find_session_for_dl(
-                        recvbuf->data, recvbuf->len);
-                if (esess) {
+                upf_sess_t *esess = upf_sess_find_by_mac(dst_mac);
+                if (esess && esess->correlation.ethernet) {
+                    /* NW-TT DL gate: drop a unicast frame gated out for this session. */
+                    if (upf_nwtt_gate_blocks(esess, recvbuf, "DL"))
+                        goto cleanup;
                     if (upf_eth_dl_forward(esess, recvbuf))
                         return; /* recvbuf consumed by ogs_pfcp_up_handle_pdr() */
                     goto cleanup;
                 }
-                /* dst-MAC not matched by any eth filter: flood per bridge behaviour. */
+                /* Ethernet PDU session SDF = Ethernet packet filters,
+                 * TS 23.501 / TS 29.244 eth SDF — do not run eth frames through
+                 * the IP matcher.
+                 *
+                 * If the dst-MAC is not yet in the UPF session table (MAC not yet
+                 * learned from UL traffic), flood the frame to all Ethernet PDU
+                 * sessions following IEEE 802.1Q bridge unknown-unicast behaviour.
+                 * This avoids the frame falling through to upf_sess_find_by_ue_ip_
+                 * address(), which treats the raw Ethernet frame as an IP packet and
+                 * errors on the MAC bytes ("IP version:10"). */
                 if (upf_eth_dl_flood(recvbuf))
-                    goto cleanup;
+                    goto cleanup; /* forwarded to all eth sessions; free original */
             } else {
                 if (upf_eth_dl_flood(recvbuf))
                     goto cleanup; /* copies forwarded; free the original */
@@ -842,11 +841,11 @@ static void _gtpv1_u_recv_cb(short when, ogs_socket_t fd, void *data)
         far = pdr->far;
         ogs_assert(far);
 
-        if (upf_sess_is_ethernet(sess)) {
+        if (sess->correlation.ethernet) {
             uint16_t inner_eth_type = _get_eth_type(pkbuf->data, pkbuf->len);
             upf_eth_class_t klass = (inner_eth_type == ETHERTYPE_GPTP)
                 ? UPF_ETH_CLASS_GPTP : UPF_ETH_CLASS_HIT;
-            /* UL VID/PCP observability (validate the per-flow 802.1Q tag out). */
+            /* NW-TT UL VID/PCP observability (validate the per-flow 802.1Q tag out). */
             uint16_t ul_vid = 0; uint8_t ul_pcp = 0;
             _get_vlan(pkbuf->data, pkbuf->len, &ul_vid, &ul_pcp);
             ogs_info("[UPF] Ethernet UL class[%s] ethertype[0x%04x] vid[%u] pcp[%u] QFI[%d] "
@@ -854,9 +853,26 @@ static void _gtpv1_u_recv_cb(short when, ogs_socket_t fd, void *data)
                      pdr->qfi, (unsigned long long)sess->upf_n4_seid);
         }
 
-        /* Ethernet PDU session UL egress: deliver the raw L2 frame to N6 TAP. */
-        if (upf_sess_is_ethernet(sess)) {
+        /* NW-TT bridge UL egress. For an Ethernet PDU session
+         * the GTP-U payload is the UE's raw L2 frame (no UE IP). Learn the inner
+         * source MAC for DL return traffic, then deliver the frame verbatim to
+         * the N6 TAP bridge port. (TS 23.501 §5.6.10.2, §5.8.2.5.3.) */
+        if (sess->correlation.ethernet) {
             ogs_pfcp_dev_t *eth_dev = upf_eth_bridge_dev();
+
+            if (pkbuf->len >= 2 * UPF_MAC_ALEN) {
+                /* learn_mac returns true only for genuinely new MACs (hash-deduped).
+                 * Report each new MAC to the SMF so the AF gets the pinned MAC after
+                 * pin_mac.py changes oaitap_ueN (TS 23.501 §5.28.1). */
+                if (upf_sess_learn_mac(sess, pkbuf->data + UPF_MAC_ALEN))
+                    upf_sess_report_learned_mac(sess, pkbuf->data + UPF_MAC_ALEN);
+            }
+
+            /* NW-TT 802.1Qbv gate enforcement (UL egress to N6). Note: the OAI UE
+             * already discards wrong-PCP UL frames via its UL QoS rules, so this is a
+             * redundant-but-spec-correct second check on the network side. */
+            if (upf_nwtt_gate_blocks(sess, pkbuf, "UL"))
+                goto cleanup;
 
             if (far->dst_if == OGS_PFCP_INTERFACE_CORE && eth_dev) {
                 for (i = 0; i < pdr->num_of_urr; i++)
@@ -866,9 +882,9 @@ static void _gtpv1_u_recv_cb(short when, ogs_socket_t fd, void *data)
                     goto cleanup;
                 }
                 if (ogs_tun_write(eth_dev->fd, pkbuf) != OGS_OK)
-                    ogs_warn("ogs_tun_write() (Ethernet UL) failed");
+                    ogs_warn("ogs_tun_write() (NW-TT UL) failed");
             } else {
-                ogs_error("[DROP] Ethernet UL: no TAP egress "
+                ogs_error("[DROP] Ethernet UL: no NW-TT TAP egress "
                           "(dst_if[%d])", far->dst_if);
             }
             goto cleanup;
