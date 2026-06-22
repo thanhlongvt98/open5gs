@@ -1,7 +1,7 @@
 /*
  * SMF-local TSC context lifecycle.
  *
- * See tsc_context.h for the data model and the Issue 6-B/6-C rationale.
+ * See tsc_context.h for the data model.
  */
 
 #include "context.h"
@@ -71,8 +71,8 @@ void smf_sess_tsc_derive(const tsc_context_t *tsc,
     /* rateRatio = 1 (single grandmaster): periodicity passes through. */
     *periodicity_5g = (uint32_t)tsc->periodicity_us;
 
-    /* Burst arrival time is encoded only once the 5G-domain value exists
-     * (clock conversion). The raw TSN-domain value is never emitted. */
+    /* Burst arrival time is encoded only once the 5G-domain value exists (clock
+     * drift conversion). The raw TSN-domain value is never emitted. */
     *has_bat = (tsc->burst_arrival_time_5g != 0);
     *bat_5g = tsc->burst_arrival_time_5g;
 }

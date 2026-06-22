@@ -27,11 +27,11 @@
 
 #include "npcf-handler.h"
 
-/* ingest the standard TSCAI input containers from a PCC rule
- * (TS 29.512) into the SMF-local TSC context (Step 1). Direction is implicit in
- * DL vs UL container presence (TS 23.501 Table 5.27.2-1). Clock conversion of
- * the burst arrival time is deferred (Phase 7); the raw value is stored as the
- * TSN-clock field. */
+/* Ingest the standard TSCAI input containers from a PCC rule (TS 29.512) into
+ * the SMF-local TSC context. Direction is implicit in DL vs UL container
+ * presence (TS 23.501 Table 5.27.2-1). Clock conversion of the burst arrival
+ * time is deferred until a 5G-domain value exists; the raw value is stored as
+ * the TSN-clock field. */
 static void smf_tsc_ingest_pcc_rule(
         smf_sess_t *sess, OpenAPI_pcc_rule_t *PccRule)
 {
@@ -313,20 +313,14 @@ static void update_authorized_pcc_rule_and_qos(
                         continue;
                     }
 
-                    if (FlowInformation->eth_flow_description) {
-                        flow->is_eth = true;
-                        flow->description = NULL;
-                        ogs_pf_content_from_eth_flow_description(
-                                FlowInformation->eth_flow_description,
-                                &flow->eth_content);
-                    } else if (FlowInformation->flow_description) {
-                        flow->description =
-                            ogs_strdup(FlowInformation->flow_description);
-                        ogs_assert(flow->description);
-                    } else {
-                        ogs_error("No FlowDescription or EthFlowDescription");
+                    if (!FlowInformation->flow_description) {
+                        ogs_error("No FlowDescription");
                         continue;
                     }
+
+                    flow->description =
+                        ogs_strdup(FlowInformation->flow_description);
+                    ogs_assert(flow->description);
 
                     pcc_rule->num_of_flow++;
                 }

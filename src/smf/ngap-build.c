@@ -19,48 +19,59 @@
 
 #include "ngap-build.h"
 
-/* Encode a 5G-domain instant (nanoseconds) as the 8-octet content of the NGAP
- * BurstArrivalTime OCTET STRING (TS 38.413 §9.3.1.133): the unaligned-PER
- * encoding of ReferenceTime-r16 (TS 38.331), truncated to 1 us accuracy.
- *   refDays           INTEGER(0..72999)   17 bits
- *   refSeconds        INTEGER(0..86399)   17 bits
- *   refMilliSeconds   INTEGER(0..999)     10 bits
- *   refTenNanoSeconds INTEGER(0..99999)   17 bits   (10 ns units)
- * 17+17+10+17 = 61 bits, packed MSB-first, padded with 3 zero bits to 8 octets. */
-static void smf_ngap_encode_burst_arrival_time(uint64_t bat_ns, uint8_t out[8])
+/* CN Packet Delay Budget (TS 23.501 §5.7.3.4) in 0.01 ms units, signalled on a
+ * NonDynamic5QIDescriptor (TS 38.413 §9.3.1.28, ext IEs 187/188) so the NG-RAN
+ * scheduler can compute the radio deadline 5G-AN PDB = PDB - CN PDB. The CN PDB is
+ * a per-5QI value: it must fit inside that 5QI's PDB (TS 23.501 Table 5.7.4-1), so a
+ * single global constant would over-subtract for tight delay-critical 5QIs (e.g. 5QI
+ * 85, 5 ms PDB) and under-subtract for relaxed ones. Only delay-critical GBR 5QIs
+ * (82-86) carry a CN PDB; a 5QI with no table entry signals none (TS 23.501 §5.7.3.4
+ * — CN PDB is a delay-critical-GBR concept). Values are a topology constant
+ * (PSA-UPF <-> NG-RAN); lab knob, tune per 5QI as experiments demand. */
+typedef struct smf_cn_pdb_s {
+    uint8_t  five_qi;        /* standardized 5QI index */
+    uint16_t cn_pdb_dl_001ms;/* DL CN PDB, 0.01 ms units (0 = omit direction) */
+    uint16_t cn_pdb_ul_001ms;/* UL CN PDB, 0.01 ms units (0 = omit direction) */
+} smf_cn_pdb_t;
+
+static const smf_cn_pdb_t smf_cn_pdb_table[] = {
+    /* CN PDB per TS 23.501 R17 Table 5.7.4-1 NOTEs 4/5/6 (static UPF<->5G-AN delay),
+     * applied symmetrically to DL and UL (the spec gives one one-way value). */
+    { 82, 100, 100 },  /* NOTE 4: 1.00 ms */
+    { 83, 100, 100 },  /* NOTE 4: 1.00 ms */
+    { 84, 500, 500 },  /* NOTE 6: 5.00 ms */
+    { 85, 200, 200 },  /* NOTE 5: 2.00 ms */
+    { 86, 200, 200 },  /* NOTE 5: 2.00 ms */
+    /* 5QIs 87-90 are R18 additions (not in R17 Table 5.7.4-1).
+     * CN PDB values below are extrapolated and UNVERIFIED against
+     * R18 — verify against TS 23.501 R18 Table 5.7.4-1 before relying on them. */
+    { 87, 100, 100 },  /* NOTE 4: 1.00 ms */
+    { 88, 100, 100 },  /* NOTE 4: 1.00 ms */
+    { 89, 100, 100 },  /* NOTE 4: 1.00 ms */
+    { 90, 100, 100 },  /* NOTE 4: 1.00 ms */
+};
+
+/* Return the per-5QI CN PDB entry for a standardized 5QI, or NULL when the 5QI is
+ * not delay-critical GBR (no CN PDB extension is then signalled). */
+static const smf_cn_pdb_t *smf_cn_pdb_lookup(uint8_t five_qi)
 {
-    const uint64_t ns_per_day = 86400000000000ULL;
-    uint32_t ref_days = (uint32_t)(bat_ns / ns_per_day);
-    uint64_t rem      = bat_ns % ns_per_day;
-    uint32_t ref_secs = (uint32_t)(rem / 1000000000ULL);
-    uint64_t sub_s    = rem % 1000000000ULL;             /* ns within the second */
-    uint32_t ref_ms   = (uint32_t)(sub_s / 1000000ULL);  /* whole milliseconds */
-    uint64_t sub_ms   = sub_s % 1000000ULL;              /* ns within the millisecond */
-    /* 1 us accuracy: 10-ns units truncated to a multiple of 100 (= 1 us). */
-    uint32_t ref_10ns = (uint32_t)((sub_ms / 1000ULL) * 100ULL);
-
-    if (ref_days > 72999) ref_days = 72999; /* defensive clamp to the ASN.1 range */
-
-    uint64_t bits = 0;
-    bits = (bits << 17) | (ref_days & 0x1FFFFULL);
-    bits = (bits << 17) | (ref_secs & 0x1FFFFULL);
-    bits = (bits << 10) | (ref_ms   & 0x3FFULL);
-    bits = (bits << 17) | (ref_10ns & 0x1FFFFULL);
-    bits = (bits << 3); /* 3 pad bits -> 64 bits total */
-
-    int i;
-    for (i = 7; i >= 0; --i) { out[i] = (uint8_t)(bits & 0xFF); bits >>= 8; }
+    unsigned int i;
+    for (i = 0; i < OGS_ARRAY_SIZE(smf_cn_pdb_table); i++) {
+        if (smf_cn_pdb_table[i].five_qi == five_qi)
+            return &smf_cn_pdb_table[i];
+    }
+    return NULL;
 }
 
 /*
- * Build one direction's NGAP TSC Assistance Information (TS 38.413 §9.3.1.131)
- * from the SMF-local TSC context. Carries the mandatory Periodicity (5G-domain,
- * µs), the optional Burst Arrival Time (only when the 5G-domain value exists)
- * with the TS 23.501 §5.27.2.4 per-direction BAT derivation applied, and the
- * optional Survival Time extension (id 327) when present.
+ * Build one NGAP TSC Assistance Information (TS 38.413 §9.3.1.131) from the
+ * SMF-local TSC context, for a single direction. Carries the mandatory
+ * Periodicity (5G-domain, µs), the optional Burst Arrival Time (only when the
+ * 5G-domain value exists), and the optional Survival Time extension (id 327)
+ * when present.
  */
 static NGAP_TSCAssistanceInformation_t *smf_ngap_build_tsc_assistance(
-        const tsc_context_t *tsc, int direction, uint8_t five_qi)
+        const tsc_context_t *tsc)
 {
     NGAP_TSCAssistanceInformation_t *tscai = NULL;
     uint32_t periodicity_5g = 0;
@@ -76,27 +87,17 @@ static NGAP_TSCAssistanceInformation_t *smf_ngap_build_tsc_assistance(
     tscai->periodicity = (NGAP_Periodicity_t)periodicity_5g;
 
     if (has_bat) {
-        /* TS 23.501 §5.27.2.4 TSCAI determination from the TSC Assistance
-         * Container. The base value (bat_5g) is the external-GM burst arrival
-         * time already mapped to the 5G clock (clock offset; rateRatio = 1, no
-         * UPF report). Per direction:
-         *   DL: TSCAI BAT = corrected BAT + static CN PDB of the 5QI
-         *       (clause 5.7.3.4) = latest arrival at the AN ingress.
-         *   UL: TSCAI BAT = corrected BAT + UE-DS-TT residence time = latest
-         *       arrival at the UE egress. The UE provides no DS-TT residence
-         *       time over N1 in this deployment, so per the clause ("up to SMF
-         *       implementation") it is taken as 0. */
-        uint64_t bat_dir = bat_5g;
-        if (direction == TSC_DL) {
-            const smf_cn_pdb_t *cn = smf_cn_pdb_lookup(five_qi);
-            if (cn && cn->cn_pdb_dl_001ms > 0)
-                bat_dir += (uint64_t)cn->cn_pdb_dl_001ms * 10000ULL; /* 0.01 ms -> ns */
-        }
-        /* else UL: + UE-DS-TT residence time (0, not provided). */
-
+        /* Burst Arrival Time: OCTET STRING (ReferenceTime), already 5G-domain.
+         * 8-octet big-endian carrier; exact ReferenceTime formatting follows
+         * the clock-drift conversion when the value is first produced. */
         uint8_t buf[8];
-        smf_ngap_encode_burst_arrival_time(bat_dir, buf);
-        tscai->burstArrivalTime = CALLOC(1, sizeof(NGAP_BurstArrivalTime_t));
+        int i;
+        for (i = 7; i >= 0; i--) {
+            buf[i] = (uint8_t)(bat_5g & 0xff);
+            bat_5g >>= 8;
+        }
+        tscai->burstArrivalTime =
+            CALLOC(1, sizeof(NGAP_BurstArrivalTime_t));
         ogs_assert(tscai->burstArrivalTime);
         ogs_assert(OCTET_STRING_fromBuf(
                 tscai->burstArrivalTime, (const char *)buf, sizeof(buf)) == 0);
@@ -148,9 +149,7 @@ static void smf_ngap_build_qos_characteristics(
         qosCharacteristics->choice.dynamic5QI = dynamic5QI;
 
         dynamic5QI->priorityLevelQos = qos->dyn_5qi.priority_level;
-        /* dyn_5qi.packet_delay_budget is ms (N7); NGAP PDB is 0.5 ms (TS 38.413 §9.3.1.80). */
-        dynamic5QI->packetDelayBudget = ogs_min(
-                qos->dyn_5qi.packet_delay_budget * 2, 1023);
+        dynamic5QI->packetDelayBudget = qos->dyn_5qi.packet_delay_budget;
         dynamic5QI->packetErrorRate.pERScalar =
             qos->dyn_5qi.packet_error_rate.scalar;
         dynamic5QI->packetErrorRate.pERExponent =
@@ -194,7 +193,19 @@ static void smf_ngap_build_qos_characteristics(
     qosCharacteristics->choice.nonDynamic5QI = nonDynamic5QI;
     nonDynamic5QI->fiveQI = qos->index;
 
-    /* Ob.4 deferred: NonDynamic MDBV override excluded from 1.c1. */
+    /* Explicit MDBV on a standardized 5QI overrides the 5QI table default
+     * (TS 38.413 §9.3.1.28; TS 23.501 §5.7.3.7), so the gNB sizes the CG/SPS
+     * grant to the real TSC burst. NonDynamic path only — Dynamic path above
+     * is pre-existing and carries its own MDBV without a separate log. */
+    if (qos->dyn_5qi.max_data_burst_volume) {
+        nonDynamic5QI->maximumDataBurstVolume =
+            CALLOC(1, sizeof(NGAP_MaximumDataBurstVolume_t));
+        ogs_assert(nonDynamic5QI->maximumDataBurstVolume);
+        *nonDynamic5QI->maximumDataBurstVolume =
+            qos->dyn_5qi.max_data_burst_volume;
+        ogs_info("[SMF] NGAP MDBV encoded on NonDynamic5QI: 5QI[%d] MDBV[%d B]",
+                 qos->index, qos->dyn_5qi.max_data_burst_volume);
+    }
 
     /* CN Packet Delay Budget DL/UL extension (TS 38.413 §9.3.1.28, ext IEs 187/188;
      * ExtendedPacketDelayBudget in 0.01 ms units) so the gNB can subtract it from the
@@ -577,8 +588,7 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_setup_request_transfer(
 
         /* Attach TSC Traffic Characteristics (id 196) on this QoS Flow Setup
          * Request Item when the session carries TSC assistance for this QFI.
-         * Direction selects the DL/UL sub-IE(s). The gNB decodes the IE;
-         * baseline flows add nothing. */
+         * Direction selects the DL/UL sub-IE(s). Baseline flows add nothing. */
         if (sess->tsc && sess->tsc->status == TSC_STATUS_ACTIVE &&
                 qos_flow->qfi == sess->tsc->qfi) {
             NGAP_ProtocolExtensionContainer_11905P280_t *tscExtContainer = NULL;
@@ -606,13 +616,11 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_setup_request_transfer(
             if (sess->tsc->direction == TSC_DL ||
                     sess->tsc->direction == TSC_BOTH)
                 TSCTrafficCharacteristics->tSCAssistanceInformationDL =
-                    smf_ngap_build_tsc_assistance(
-                            sess->tsc, TSC_DL, qos_flow->qos.index);
+                    smf_ngap_build_tsc_assistance(sess->tsc);
             if (sess->tsc->direction == TSC_UL ||
                     sess->tsc->direction == TSC_BOTH)
                 TSCTrafficCharacteristics->tSCAssistanceInformationUL =
-                    smf_ngap_build_tsc_assistance(
-                            sess->tsc, TSC_UL, qos_flow->qos.index);
+                    smf_ngap_build_tsc_assistance(sess->tsc);
 
             ogs_info("[SMF] NGAP TSC Traffic Characteristics encoded: "
                      "QFI[%d] dir[%d] periodicity[%llu us]",
@@ -620,9 +628,9 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_setup_request_transfer(
                      (unsigned long long)sess->tsc->periodicity_us);
         } else if (sess->tsc && sess->tsc->status != TSC_STATUS_ABSENT &&
                 qos_flow->qfi == sess->tsc->qfi) {
-            /* TSC was requested for this flow but is not ACTIVE
-             * (PARTIAL/DOWNGRADED) — omit the IE and run on the 5QI. The reason
-             * is surfaced so the baseline fallback is explicit in logs. */
+            /* TSC was requested for this flow but is not ACTIVE (PARTIAL or
+             * DOWNGRADED) — omit the IE and run on the 5QI. The reason is
+             * surfaced so the baseline fallback is explicit in logs. */
             ogs_warn("[SMF] NGAP TSC IE omitted: QFI[%d] status[%d] reason[%s] "
                      "-- flow proceeds on baseline 5QI",
                      qos_flow->qfi, sess->tsc->status,
@@ -779,13 +787,11 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_modify_request_transfer(
                         if (sess->tsc->direction == TSC_DL ||
                                 sess->tsc->direction == TSC_BOTH)
                             TSCTrafficCharacteristics->tSCAssistanceInformationDL =
-                                smf_ngap_build_tsc_assistance(
-                                        sess->tsc, TSC_DL, qos.index);
+                                smf_ngap_build_tsc_assistance(sess->tsc);
                         if (sess->tsc->direction == TSC_UL ||
                                 sess->tsc->direction == TSC_BOTH)
                             TSCTrafficCharacteristics->tSCAssistanceInformationUL =
-                                smf_ngap_build_tsc_assistance(
-                                        sess->tsc, TSC_UL, qos.index);
+                                smf_ngap_build_tsc_assistance(sess->tsc);
 
                         ogs_info("[SMF] NGAP TSC Traffic Characteristics encoded (modify): "
                                  "QFI[%d] dir[%d] periodicity[%llu us]",
@@ -851,13 +857,11 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_modify_request_transfer(
                 if (sess->tsc->direction == TSC_DL ||
                         sess->tsc->direction == TSC_BOTH)
                     TSCTrafficCharacteristics->tSCAssistanceInformationDL =
-                        smf_ngap_build_tsc_assistance(
-                                sess->tsc, TSC_DL, qos_flow->qos.index);
+                        smf_ngap_build_tsc_assistance(sess->tsc);
                 if (sess->tsc->direction == TSC_UL ||
                         sess->tsc->direction == TSC_BOTH)
                     TSCTrafficCharacteristics->tSCAssistanceInformationUL =
-                        smf_ngap_build_tsc_assistance(
-                                sess->tsc, TSC_UL, qos_flow->qos.index);
+                        smf_ngap_build_tsc_assistance(sess->tsc);
 
                 ogs_info("[SMF] NGAP TSC Traffic Characteristics encoded (modify): "
                          "QFI[%d] dir[%d] periodicity[%llu us]",

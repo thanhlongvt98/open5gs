@@ -151,15 +151,21 @@ uint32_t smf_gx_handle_cca_initial_request(
     up2cp_pdr = sess->up2cp_pdr;
     ogs_assert(up2cp_pdr);
 
-    /* Set UE IP Address to the Default DL PDR */
-    ogs_assert(OGS_OK ==
-        ogs_pfcp_paa_to_ue_ip_addr(&sess->paa,
-            &dl_pdr->ue_ip_addr, &dl_pdr->ue_ip_addr_len));
-    dl_pdr->ue_ip_addr.sd = OGS_PFCP_UE_IP_DST;
+    /* Set UE IP Address to the Default DL PDR.
+     * Ethernet PDU sessions (5GS only) carry no UE IP; the EPC/Gx path is IP
+     * only, but guard defensively so a misconfigured type cannot crash here. */
+    if (sess->session.session_type == OGS_PDU_SESSION_TYPE_ETHERNET) {
+        dl_pdr->ethernet_pdu_session_information = true;
+    } else {
+        ogs_assert(OGS_OK ==
+            ogs_pfcp_paa_to_ue_ip_addr(&sess->paa,
+                &dl_pdr->ue_ip_addr, &dl_pdr->ue_ip_addr_len));
+        dl_pdr->ue_ip_addr.sd = OGS_PFCP_UE_IP_DST;
 
-    ogs_assert(OGS_OK ==
-        ogs_pfcp_paa_to_ue_ip_addr(&sess->paa,
-            &ul_pdr->ue_ip_addr, &ul_pdr->ue_ip_addr_len));
+        ogs_assert(OGS_OK ==
+            ogs_pfcp_paa_to_ue_ip_addr(&sess->paa,
+                &ul_pdr->ue_ip_addr, &ul_pdr->ue_ip_addr_len));
+    }
 
     /* Set UE-to-CP Flow-Description and Outer-Header-Creation */
     up2cp_pdr->flow[up2cp_pdr->num_of_flow].fd = 1;

@@ -2182,7 +2182,7 @@ void smf_sess_remove(smf_sess_t *sess)
     /* free SMF-local TSC context (no-op when sess->tsc NULL). */
     smf_sess_tsc_remove(sess);
 
-    /* /07: free the per-port PMIC blobs. */
+    /* Free the per-port PMIC blobs. */
     if (sess->tsc_bridge.dstt_pmic)
         ogs_free(sess->tsc_bridge.dstt_pmic);
     if (sess->tsc_bridge.nwtt_pmic)
@@ -3187,37 +3187,19 @@ void smf_bearer_tft_update(smf_bearer_t *bearer)
 
     ogs_list_for_each(&bearer->pf_list, pf) {
         if (pf->direction == OGS_FLOW_DOWNLINK_ONLY) {
-            dl_pdr->flow[dl_pdr->num_of_flow].fd = pf->is_eth ? 0 : 1;
-            dl_pdr->flow[dl_pdr->num_of_flow].is_eth = pf->is_eth;
-            if (pf->is_eth) {
-                dl_pdr->flow[dl_pdr->num_of_flow].description = NULL;
-                dl_pdr->flow[dl_pdr->num_of_flow].eth_content = pf->eth_content;
-            } else {
-                dl_pdr->flow[dl_pdr->num_of_flow].description =
-                    pf->flow_description;
-            }
+            dl_pdr->flow[dl_pdr->num_of_flow].fd = 1;
+            dl_pdr->flow[dl_pdr->num_of_flow].description =
+                pf->flow_description;
             dl_pdr->num_of_flow++;
         } else if (pf->direction == OGS_FLOW_UPLINK_ONLY) {
-            ul_pdr->flow[ul_pdr->num_of_flow].fd = pf->is_eth ? 0 : 1;
-            ul_pdr->flow[ul_pdr->num_of_flow].is_eth = pf->is_eth;
-            if (pf->is_eth) {
-                ul_pdr->flow[ul_pdr->num_of_flow].description = NULL;
-                ul_pdr->flow[ul_pdr->num_of_flow].eth_content = pf->eth_content;
-            } else {
-                ul_pdr->flow[ul_pdr->num_of_flow].description =
-                    pf->flow_description;
-            }
+            ul_pdr->flow[ul_pdr->num_of_flow].fd = 1;
+            ul_pdr->flow[ul_pdr->num_of_flow].description =
+                pf->flow_description;
             ul_pdr->num_of_flow++;
         } else if (pf->direction == OGS_FLOW_BIDIRECTIONAL) {
-            dl_pdr->flow[dl_pdr->num_of_flow].fd = pf->is_eth ? 0 : 1;
-            dl_pdr->flow[dl_pdr->num_of_flow].is_eth = pf->is_eth;
-            if (pf->is_eth) {
-                dl_pdr->flow[dl_pdr->num_of_flow].description = NULL;
-                dl_pdr->flow[dl_pdr->num_of_flow].eth_content = pf->eth_content;
-            } else {
-                dl_pdr->flow[dl_pdr->num_of_flow].description =
-                    pf->flow_description;
-            }
+            dl_pdr->flow[dl_pdr->num_of_flow].fd = 1;
+            dl_pdr->flow[dl_pdr->num_of_flow].description =
+                pf->flow_description;
             dl_pdr->flow[dl_pdr->num_of_flow].bid = 1;
             dl_pdr->flow[dl_pdr->num_of_flow].sdf_filter_id = pf->sdf_filter_id;
             dl_pdr->num_of_flow++;

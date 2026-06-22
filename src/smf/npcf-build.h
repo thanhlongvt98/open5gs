@@ -30,6 +30,9 @@ ogs_sbi_request_t *smf_npcf_smpolicycontrol_build_create(
         smf_sess_t *sess, void *data);
 ogs_sbi_request_t *smf_npcf_smpolicycontrol_build_delete(
         smf_sess_t *sess, void *data);
+/* SMF->PCF SM Policy Update reporting the 5GS TSN bridge. */
+ogs_sbi_request_t *smf_npcf_smpolicycontrol_build_update_tsn_bridge(
+        smf_sess_t *sess, void *data);
 
 #ifdef __cplusplus
 }
