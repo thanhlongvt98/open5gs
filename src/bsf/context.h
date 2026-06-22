@@ -37,6 +37,7 @@ extern int __bsf_log_domain;
 typedef struct bsf_context_s {
     ogs_hash_t          *ipv4addr_hash;
     ogs_hash_t          *ipv6prefix_hash;
+    ogs_hash_t          *mac_addr_hash; /* MAC-keyed PCF bindings (PcfBinding.macAddr48) */
 
     ogs_list_t          sess_list;
 } bsf_context_t;
@@ -60,6 +61,10 @@ typedef struct bsf_sess_s {
         uint8_t len;
         uint8_t addr6[OGS_IPV6_LEN];
     } ipv6prefix;
+
+    /* MAC-keyed binding for Ethernet PDU sessions (no UE IP). */
+    uint8_t mac_addr[6];
+    char *mac_addr48_string;
 
     ogs_s_nssai_t s_nssai;
     char *dnn;
@@ -101,6 +106,12 @@ bsf_sess_t *bsf_sess_find_by_ipv4addr(
         char *ipv4addr_string, bool *invalid);
 bsf_sess_t *bsf_sess_find_by_ipv6prefix(
         char *ipv6prefix_string, bool *invalid);
+
+/* MAC-keyed PCF binding (TS 29.521 PcfBinding.macAddr48) for Ethernet
+ * PDU sessions, which have no UE IP. */
+bsf_sess_t *bsf_sess_add_by_mac_address(char *mac_addr48_string);
+bool bsf_sess_set_mac_addr(bsf_sess_t *sess, char *mac_addr48_string);
+bsf_sess_t *bsf_sess_find_by_mac_addr(char *mac_addr48_string);
 int get_sess_load(void);
 
 #ifdef __cplusplus

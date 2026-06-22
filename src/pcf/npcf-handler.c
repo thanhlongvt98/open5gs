@@ -18,7 +18,6 @@
  */
 
 #include "sbi-path.h"
-#include "ipfw/ogs-ipfw.h"
 
 #include "npcf-handler.h"
 
@@ -663,7 +662,6 @@ cleanup:
     return false;
 }
 
-
 /*
  * handle the SMF-initiated Npcf_SMPolicyControl_Update
  * (TS 29.512 §4.2.4) — in particular the 5GS TSN bridge information reported by
@@ -740,7 +738,7 @@ bool pcf_npcf_smpolicycontrol_handle_update(pcf_sess_t *sess,
 /* PCF QoS mapping table: standardized Delay-critical GBR 5QIs from TS 23.501 R17
  * Table 5.7.4-1, restricted to the set the gNB knows from its default config
  * (CU-CP + DU) so no per-5QI gNB qos block is needed. */
-typedef struct pcf_tsc_5qi_s {
+static const struct {
     uint8_t  five_qi;
     uint8_t  priority;      /* Priority Level (lower = higher priority). */
     uint16_t pdb_ms;        /* Packet Delay Budget, ms. */
@@ -749,9 +747,7 @@ typedef struct pcf_tsc_5qi_s {
     uint16_t mdbv;          /* Default Maximum Data Burst Volume, bytes. */
     uint16_t avg_window_ms; /* Default Averaging Window, ms. */
     uint16_t cn_pdb_ms;     /* Static CN PDB (UPF<->5G-AN), ms (NOTE 4/5/6). */
-} pcf_tsc_5qi_t;
-
-static const pcf_tsc_5qi_t pcf_tsc_5qi_table[] = {
+} pcf_tsc_5qi_table[] = {
     /* 5QI prio pdb  per(s,e)  mdbv  avgw  cnpdb   (TS 23.501 R17 Table 5.7.4-1) */
     {  82,  19,  10,  1, 4,    255,  2000,   1 }, /* Discrete Automation         */
     {  83,  22,  10,  1, 4,    1354, 2000,   1 }, /* Discrete Automation / V2X   */
@@ -771,7 +767,6 @@ static const pcf_tsc_5qi_t pcf_tsc_5qi_table[] = {
  * 85 (delay-critical GBR, PDB 5ms) = the subscriber-provisioned Ethernet-session 5QI,
  * so the AF-requested TSC flow folds onto the same QoS flow (no 84/85 split). */
 #define PCF_TSC_5QI_DEFAULT 85
-
 
 /* Map the AF's TsnQosContainer (TS 29.514 §5.6.2.35) to a standardized
  * delay-critical-GBR 5QI (PCF QoS mapping, TS 23.501 §5.28.4 / §5.27.3 point 5).
@@ -794,25 +789,26 @@ static void pcf_map_tsn_qos_to_5qi(ogs_dyn_5qi_t *dyn,
     uint16_t sel_pdb = 0, sel_mdbv = 0;
     size_t i;
 
-    /* TS 29.514 fields are unsigned; ignore malformed negative AF values rather
-     * than letting (uint16_t) cast wrap into bogus PDB/MDBV checks. */
-    if (has_pdb && pack_delay < 0)
-        has_pdb = false;
-    if (has_burst && burst_size < 0)
-        has_burst = false;
-
     /* The AF's tscPrioLevel is intentionally ignored for 5QI selection: it encodes
      * 8 − PCP (range 1..8), which cannot match the standardized Priority Levels
      * (18..24, Table 5.7.4-1), so it is not passed here (TS 23.501 §5.7.3.3).
      * Within the DC-GBR set the pair (PDB, MDBV) uniquely identifies each 5QI;
      * selection keys on PDB (from tscPackDelay) + MDBV (>= the TSC burst). */
 
-    /* Standardized 5QI -> NGAP NonDynamic5QIDescriptor (dynamic path stays off).
-     * Ob.4 deferred: do not store or signal true-burst MDBV on dyn_5qi — the gNB
-     * uses the selected NonDynamic 5QI's standardized MDBV (TS 23.501 §5.7.3.7).
-     * Selection below keys only on the burst_size argument (maxDataBurstVol). */
+    /* Standardized 5QI -> NGAP NonDynamic5QIDescriptor (dynamic path stays off). */
     dyn->is_dynamic = false;
     dyn->delay_critical = true;
+
+    /* Store the real burst as the NonDynamic5QI MDBV; the QoS-flow field is
+     * uint16_t, so clamp and warn rather than silently truncate. */
+    if (has_burst) {
+        if (burst_size > UINT16_MAX) {
+            ogs_warn("[PCF] TSN burst %d B exceeds MDBV uint16_t cap; "
+                     "clamping to %d", burst_size, UINT16_MAX);
+            burst_size = UINT16_MAX;
+        }
+        dyn->max_data_burst_volume = (uint16_t)burst_size;
+    }
 
     /* Pick the best satisfying row in one pass, ranked:
      *   1. exact PDB match (pdb == requested) beats a merely-satisfying one — lets a
@@ -1087,9 +1083,9 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
                  * GBR 5QI (TS 29.514 §5.6.2.35 -> TS 23.501 §5.28.4); the CNC-defined
                  * TSCAI is carried separately (tscaiInput), unaffected by the 5QI. */
                 if (MediaComponent->tsn_qos)
-                    /* Selection keys on the TRUE per-period burst from the
-                     * MediaComponent (maxDataBurstVol), not the spec-floored
-                     * tsnQos.maxTscBurstSize (>=4096, TS 29.514 §5.6.2.35),
+                    /* Selection (and the emitted MDBV) keys on the TRUE per-period
+                     * burst from the MediaComponent (maxDataBurstVol), not the
+                     * spec-floored tsnQos.maxTscBurstSize (>=4096, TS 29.514 §5.6.2.35),
                      * which would fail every MDBV-coverage check (TS 23.501 §5.7.3.7). */
                     pcf_map_tsn_qos_to_5qi(&media_component->dyn_5qi,
                             MediaComponent->tsn_qos->is_tsc_pack_delay,
@@ -1141,7 +1137,7 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
 
                             /* TSN Ethernet PDU session: carry the real L2
                              * stream filter (TS 29.514 EthFlowDescription)
-                             * as a structured ogs_flow (is_eth + eth_content) so
+                             * as an "eth|..." sentinel in flow->description so
                              * the SMF builds a proper Ethernet ogs_pf_content_t
                              * (TS 24.501 §9.11.4.13) for the UE QoS rule.
                              * A second flow for gPTP (EtherType 0x88F7) is
@@ -1195,27 +1191,25 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
                                 if (sub->num_of_flow <
                                         (int)OGS_ARRAY_SIZE(sub->flow)) {
                                     flow = &sub->flow[sub->num_of_flow];
-                                    flow->is_eth = true;
-                                    flow->description = NULL;
-                                    ogs_pf_content_from_eth_fields(
-                                            dst_mac, src_mac,
-                                            vid_str, pcp_str, eth_type,
-                                            &flow->eth_content);
+                                    flow->description = ogs_msprintf(
+                                        "eth|%s|%s|%s|%s|%s",
+                                        dst_mac, src_mac,
+                                        vid_str, pcp_str, eth_type);
+                                    ogs_assert(flow->description);
                                     flow->direction = OGS_FLOW_BIDIRECTIONAL;
                                     sub->num_of_flow++;
                                     ogs_info("[PCF] EthFlowDescription -> "
-                                        "structured L2 filter (TSN stream)");
+                                        "L2 sentinel (TSN stream): %s",
+                                        flow->description);
                                 }
 
                                 /* Secondary flow: gPTP (EtherType 0x88F7) */
                                 if (sub->num_of_flow <
                                         (int)OGS_ARRAY_SIZE(sub->flow)) {
                                     flow2 = &sub->flow[sub->num_of_flow];
-                                    flow2->is_eth = true;
-                                    flow2->description = NULL;
-                                    ogs_pf_content_from_eth_fields(
-                                            "-", "-", "-", "-", "88f7",
-                                            &flow2->eth_content);
+                                    flow2->description =
+                                        ogs_strdup("eth|-|-|-|-|88f7");
+                                    ogs_assert(flow2->description);
                                     flow2->direction = OGS_FLOW_BIDIRECTIONAL;
                                     sub->num_of_flow++;
                                 }
@@ -1754,9 +1748,9 @@ bool pcf_npcf_policyauthorization_handle_update(
                  * GBR 5QI (TS 29.514 §5.6.2.35 -> TS 23.501 §5.28.4); the CNC-defined
                  * TSCAI is carried separately (tscaiInput), unaffected by the 5QI. */
                 if (MediaComponent->tsn_qos)
-                    /* Selection keys on the TRUE per-period burst from the
-                     * MediaComponent (maxDataBurstVol), not the spec-floored
-                     * tsnQos.maxTscBurstSize (>=4096, TS 29.514 §5.6.2.35),
+                    /* Selection (and the emitted MDBV) keys on the TRUE per-period
+                     * burst from the MediaComponent (maxDataBurstVol), not the
+                     * spec-floored tsnQos.maxTscBurstSize (>=4096, TS 29.514 §5.6.2.35),
                      * which would fail every MDBV-coverage check (TS 23.501 §5.7.3.7). */
                     pcf_map_tsn_qos_to_5qi(&media_component->dyn_5qi,
                             MediaComponent->tsn_qos->is_tsc_pack_delay,
@@ -1808,7 +1802,7 @@ bool pcf_npcf_policyauthorization_handle_update(
 
                             /* TSN Ethernet PDU session: carry the real L2
                              * stream filter (TS 29.514 EthFlowDescription)
-                             * as a structured ogs_flow (is_eth + eth_content) so
+                             * as an "eth|..." sentinel in flow->description so
                              * the SMF builds a proper Ethernet ogs_pf_content_t
                              * (TS 24.501 §9.11.4.13) for the UE QoS rule.
                              * A second flow for gPTP (EtherType 0x88F7) is
@@ -1860,27 +1854,25 @@ bool pcf_npcf_policyauthorization_handle_update(
                                 if (sub->num_of_flow <
                                         (int)OGS_ARRAY_SIZE(sub->flow)) {
                                     flow = &sub->flow[sub->num_of_flow];
-                                    flow->is_eth = true;
-                                    flow->description = NULL;
-                                    ogs_pf_content_from_eth_fields(
-                                            dst_mac, src_mac,
-                                            vid_str, pcp_str, eth_type,
-                                            &flow->eth_content);
+                                    flow->description = ogs_msprintf(
+                                        "eth|%s|%s|%s|%s|%s",
+                                        dst_mac, src_mac,
+                                        vid_str, pcp_str, eth_type);
+                                    ogs_assert(flow->description);
                                     flow->direction = OGS_FLOW_BIDIRECTIONAL;
                                     sub->num_of_flow++;
                                     ogs_info("[PCF] EthFlowDescription -> "
-                                        "structured L2 filter (TSN stream)");
+                                        "L2 sentinel (TSN stream): %s",
+                                        flow->description);
                                 }
 
                                 /* Secondary flow: gPTP (EtherType 0x88F7) */
                                 if (sub->num_of_flow <
                                         (int)OGS_ARRAY_SIZE(sub->flow)) {
                                     flow2 = &sub->flow[sub->num_of_flow];
-                                    flow2->is_eth = true;
-                                    flow2->description = NULL;
-                                    ogs_pf_content_from_eth_fields(
-                                            "-", "-", "-", "-", "88f7",
-                                            &flow2->eth_content);
+                                    flow2->description =
+                                        ogs_strdup("eth|-|-|-|-|88f7");
+                                    ogs_assert(flow2->description);
                                     flow2->direction = OGS_FLOW_BIDIRECTIONAL;
                                     sub->num_of_flow++;
                                 }
