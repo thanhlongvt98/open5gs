@@ -674,6 +674,18 @@ ogs_pfcp_pdr_t *ogs_pfcp_handle_create_pdr(ogs_pfcp_sess_t *sess,
         }
     }
 
+    /* Ethernet Packet Filter (TS 29.244 §5.13, type 132) */
+    if (message->pdi.ethernet_packet_filter.presence) {
+        ogs_pfcp_rule_t *eth_rule = ogs_pfcp_rule_add(pdr);
+        ogs_assert(eth_rule);
+        rv = ogs_pfcp_parse_eth_packet_filter(
+                eth_rule, &message->pdi.ethernet_packet_filter);
+        if (rv != OGS_OK) {
+            ogs_error("ogs_pfcp_parse_eth_packet_filter() failed");
+            ogs_pfcp_rule_remove(eth_rule);
+        }
+    }
+
     if (pdr->dnn) {
         ogs_free(pdr->dnn);
         pdr->dnn = NULL;
@@ -1078,6 +1090,18 @@ ogs_pfcp_pdr_t *ogs_pfcp_handle_update_pdr(ogs_pfcp_sess_t *sess,
                 /* Uplink data flow */
                 if (pdr->src_if == OGS_PFCP_INTERFACE_ACCESS)
                     ogs_ipfw_rule_swap(&rule->ipfw);
+            }
+        }
+
+        /* Ethernet Packet Filter (TS 29.244 §5.13, type 132) */
+        if (message->pdi.ethernet_packet_filter.presence) {
+            ogs_pfcp_rule_t *eth_rule = ogs_pfcp_rule_add(pdr);
+            ogs_assert(eth_rule);
+            rv = ogs_pfcp_parse_eth_packet_filter(
+                    eth_rule, &message->pdi.ethernet_packet_filter);
+            if (rv != OGS_OK) {
+                ogs_error("ogs_pfcp_parse_eth_packet_filter() failed");
+                ogs_pfcp_rule_remove(eth_rule);
             }
         }
 

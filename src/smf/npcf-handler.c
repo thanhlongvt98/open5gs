@@ -313,14 +313,53 @@ static void update_authorized_pcc_rule_and_qos(
                         continue;
                     }
 
-                    if (!FlowInformation->flow_description) {
-                        ogs_error("No FlowDescription");
+                    if (FlowInformation->eth_flow_description) {
+                        /* Ethernet flow: rebuild internal sentinel from the
+                         * EthFlowDescription received on N7. */
+                        OpenAPI_eth_flow_description_t *eth_fd =
+                            FlowInformation->eth_flow_description;
+                        const char *dst  = eth_fd->dest_mac_addr   ?
+                                           eth_fd->dest_mac_addr   : "-";
+                        const char *src  = eth_fd->source_mac_addr ?
+                                           eth_fd->source_mac_addr : "-";
+                        const char *etype = eth_fd->eth_type ?
+                                           eth_fd->eth_type : "-";
+                        char vid_str[8]  = "-";
+                        char pcp_str[8]  = "-";
+
+                        if (eth_fd->vlan_tags &&
+                                eth_fd->vlan_tags->count > 0) {
+                            /* Parse the first tag string "pcp=N,vid=V",
+                             * "vid=V", or "pcp=N" produced by conv.c. */
+                            const char *tag = (const char *)
+                                eth_fd->vlan_tags->first->data;
+                            unsigned v = 0, p = 0;
+                            if (sscanf(tag, "pcp=%u,vid=%u", &p, &v) == 2) {
+                                ogs_snprintf(vid_str, sizeof(vid_str),
+                                        "%u", v);
+                                ogs_snprintf(pcp_str, sizeof(pcp_str),
+                                        "%u", p);
+                            } else if (sscanf(tag, "vid=%u", &v) == 1) {
+                                ogs_snprintf(vid_str, sizeof(vid_str),
+                                        "%u", v);
+                            } else if (sscanf(tag, "pcp=%u", &p) == 1) {
+                                ogs_snprintf(pcp_str, sizeof(pcp_str),
+                                        "%u", p);
+                            }
+                        }
+
+                        flow->description = ogs_msprintf(
+                                "eth|%s|%s|%s|%s|%s",
+                                dst, src, vid_str, pcp_str, etype);
+                        ogs_assert(flow->description);
+                    } else if (FlowInformation->flow_description) {
+                        flow->description =
+                            ogs_strdup(FlowInformation->flow_description);
+                        ogs_assert(flow->description);
+                    } else {
+                        ogs_error("No FlowDescription or EthFlowDescription");
                         continue;
                     }
-
-                    flow->description =
-                        ogs_strdup(FlowInformation->flow_description);
-                    ogs_assert(flow->description);
 
                     pcc_rule->num_of_flow++;
                 }

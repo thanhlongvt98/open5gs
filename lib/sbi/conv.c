@@ -19,6 +19,7 @@
 
 #include "ogs-sbi.h"
 #include "yuarel.h"
+#include "ipfw/ogs-ipfw.h"
 
 static int parse_scheme_output(
         char *_protection_scheme_id, char *_scheme_output,
@@ -1532,7 +1533,109 @@ OpenAPI_pcc_rule_t *ogs_sbi_build_pcc_rule(
             }
 
             ogs_assert(flow->description);
-            FlowInformation->flow_description = flow->description;
+
+            if (strncmp(flow->description, "eth|", 4) == 0) {
+                /* Ethernet flow: encode as EthFlowDescription on N7 wire,
+                 * NOT as flowDescription (which is IPFilterRule-only). */
+                ogs_pf_content_t c;
+                OpenAPI_eth_flow_description_t *eth_fd = NULL;
+                OpenAPI_list_t *vlan_tags = NULL;
+                char *dest_mac = NULL, *src_mac = NULL, *eth_type = NULL;
+                char mac_str[18];
+                int j;
+
+                ogs_pf_content_from_eth_sentinel(flow->description, &c);
+
+                eth_fd = ogs_calloc(1, sizeof(*eth_fd));
+                ogs_assert(eth_fd);
+
+                for (j = 0; j < (int)c.num_of_component; j++) {
+                    switch (c.component[j].type) {
+                    case OGS_PACKET_FILTER_DESTINATION_MAC_ADDRESS_TYPE:
+                        ogs_snprintf(mac_str, sizeof(mac_str),
+                                "%02x:%02x:%02x:%02x:%02x:%02x",
+                                c.component[j].mac[0], c.component[j].mac[1],
+                                c.component[j].mac[2], c.component[j].mac[3],
+                                c.component[j].mac[4], c.component[j].mac[5]);
+                        dest_mac = ogs_strdup(mac_str);
+                        break;
+                    case OGS_PACKET_FILTER_SOURCE_MAC_ADDRESS_TYPE:
+                        ogs_snprintf(mac_str, sizeof(mac_str),
+                                "%02x:%02x:%02x:%02x:%02x:%02x",
+                                c.component[j].mac[0], c.component[j].mac[1],
+                                c.component[j].mac[2], c.component[j].mac[3],
+                                c.component[j].mac[4], c.component[j].mac[5]);
+                        src_mac = ogs_strdup(mac_str);
+                        break;
+                    case OGS_PACKET_FILTER_ETHERTYPE_TYPE:
+                        eth_type = ogs_msprintf("%04x",
+                                c.component[j].ethertype);
+                        break;
+                    case OGS_PACKET_FILTER_8021Q_C_TAG_VID_TYPE:
+                    case OGS_PACKET_FILTER_8021Q_C_TAG_PCP_DEI_TYPE:
+                        /* collected below after scanning all components */
+                        break;
+                    default:
+                        break;
+                    }
+                }
+
+                /* Build vlan_tags list from VID + PCP components */
+                {
+                    uint16_t vid = 0;
+                    uint8_t pcp = 0;
+                    bool has_vid = false, has_pcp = false;
+
+                    for (j = 0; j < (int)c.num_of_component; j++) {
+                        if (c.component[j].type ==
+                                OGS_PACKET_FILTER_8021Q_C_TAG_VID_TYPE) {
+                            vid = c.component[j].vid;
+                            has_vid = true;
+                        } else if (c.component[j].type ==
+                                OGS_PACKET_FILTER_8021Q_C_TAG_PCP_DEI_TYPE) {
+                            /* pcp_dei stored as (pcp << 1); recover pcp */
+                            pcp = (c.component[j].pcp_dei >> 1) & 0x7;
+                            has_pcp = true;
+                        }
+                    }
+
+                    if (has_vid || has_pcp) {
+                        char tag_str[32];
+                        /* Encode as "pcp=<N>,vid=<VID>" covering all
+                         * present sub-fields in a single string element. */
+                        if (has_pcp && has_vid)
+                            ogs_snprintf(tag_str, sizeof(tag_str),
+                                    "pcp=%u,vid=%u", (unsigned)pcp,
+                                    (unsigned)vid);
+                        else if (has_vid)
+                            ogs_snprintf(tag_str, sizeof(tag_str),
+                                    "vid=%u", (unsigned)vid);
+                        else
+                            ogs_snprintf(tag_str, sizeof(tag_str),
+                                    "pcp=%u", (unsigned)pcp);
+
+                        vlan_tags = OpenAPI_list_create();
+                        ogs_assert(vlan_tags);
+                        OpenAPI_list_add(vlan_tags, ogs_strdup(tag_str));
+                    }
+                }
+
+                /* ethType is mandatory in EthFlowDescription; default "0000"
+                 * if absent in the sentinel (should not happen in practice). */
+                if (!eth_type)
+                    eth_type = ogs_strdup("0000");
+
+                eth_fd->dest_mac_addr   = dest_mac;
+                eth_fd->source_mac_addr = src_mac;
+                eth_fd->eth_type        = eth_type;
+                eth_fd->vlan_tags       = vlan_tags;
+                /* f_desc / f_dir / *_end not used for TSN sentinels */
+
+                FlowInformation->eth_flow_description = eth_fd;
+                /* Do NOT set flow_description for Ethernet flows */
+            } else {
+                FlowInformation->flow_description = flow->description;
+            }
 
             OpenAPI_list_add(FlowInformationList, FlowInformation);
         }

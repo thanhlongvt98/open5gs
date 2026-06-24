@@ -18,6 +18,7 @@
  */
 
 #include "ogs-pfcp.h"
+#include "ipfw/ogs-ipfw.h"
 
 ogs_pkbuf_t *ogs_pfcp_build_heartbeat_request(uint8_t type)
 {
@@ -309,6 +310,9 @@ static struct {
     ogs_pfcp_f_teid_t f_teid;
     char dnn[OGS_MAX_DNN_LEN+1];
     char *sdf_filter[OGS_MAX_NUM_OF_FLOW_IN_PDR];
+    uint8_t eth_mac_buf[13];
+    uint8_t eth_ctag_buf[3];
+    uint8_t eth_etype_buf[2];
 } pdrbuf[OGS_MAX_NUM_OF_PDR];
 
 void ogs_pfcp_pdrbuf_init(void)
@@ -370,6 +374,23 @@ void ogs_pfcp_build_create_pdr(
     memset(pfcp_sdf_filter, 0, sizeof(pfcp_sdf_filter));
     for (j = 0; j < pdr->num_of_flow && j < OGS_MAX_NUM_OF_FLOW_IN_PDR; j++) {
         ogs_assert(pdr->flow[j].fd || pdr->flow[j].bid);
+
+        /* Ethernet Packet Filter (TS 29.244 §5.13, type 132):
+         * flows with "eth|" sentinel are encoded as PFCP Ethernet
+         * Packet Filter IEs, not SDF Filter IEs. */
+        if (pdr->flow[j].fd &&
+                strncmp(pdr->flow[j].description, "eth|", 4) == 0) {
+            ogs_pf_content_t c;
+            ogs_pf_content_from_eth_sentinel(
+                    pdr->flow[j].description, &c);
+            ogs_pfcp_encode_eth_packet_filter(
+                    &message->pdi.ethernet_packet_filter, &c,
+                    pdr->id, pdr->flow[j].bid,
+                    pdrbuf[i].eth_mac_buf,
+                    pdrbuf[i].eth_ctag_buf,
+                    pdrbuf[i].eth_etype_buf);
+            continue;
+        }
 
         if (pdr->flow[j].fd) {
             pfcp_sdf_filter[j].fd = 1;
@@ -528,6 +549,23 @@ void ogs_pfcp_build_update_pdr(
         memset(pfcp_sdf_filter, 0, sizeof(pfcp_sdf_filter));
         for (j = 0; j < pdr->num_of_flow && j < OGS_MAX_NUM_OF_FLOW_IN_PDR; j++) {
             ogs_assert(pdr->flow[j].fd || pdr->flow[j].bid);
+
+            /* Ethernet Packet Filter (TS 29.244 §5.13, type 132):
+             * flows with "eth|" sentinel are encoded as PFCP Ethernet
+             * Packet Filter IEs, not SDF Filter IEs. */
+            if (pdr->flow[j].fd &&
+                    strncmp(pdr->flow[j].description, "eth|", 4) == 0) {
+                ogs_pf_content_t c;
+                ogs_pf_content_from_eth_sentinel(
+                        pdr->flow[j].description, &c);
+                ogs_pfcp_encode_eth_packet_filter(
+                        &message->pdi.ethernet_packet_filter, &c,
+                        pdr->id, pdr->flow[j].bid,
+                        pdrbuf[i].eth_mac_buf,
+                        pdrbuf[i].eth_ctag_buf,
+                        pdrbuf[i].eth_etype_buf);
+                continue;
+            }
 
             if (pdr->flow[j].fd) {
                 pfcp_sdf_filter[j].fd = 1;
