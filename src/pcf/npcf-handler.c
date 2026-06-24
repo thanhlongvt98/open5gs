@@ -1143,24 +1143,32 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
                              * A second flow for gPTP (EtherType 0x88F7) is
                              * always added so gPTP sync packets are classified
                              * onto this QoS flow. */
+                            /* TS 29.514 §4.2.2.2 EthFlowDescription list:
+                             * iterate ALL entries so N TSN streams riding
+                             * ONE QFI2 flow each get their own L2 packet
+                             * filter (TS 23.501 §5.7.6 aggregation case).
+                             * gPTP is appended once after the per-stream
+                             * loop. */
                             if (sub->num_of_flow == 0 &&
                                     SubComponent->ethf_descs &&
                                     SubComponent->ethf_descs->count > 0) {
                                 OpenAPI_lnode_t *eth_node = NULL;
-                                OpenAPI_eth_flow_description_t *eth_desc = NULL;
-                                ogs_flow_t *flow = NULL;
                                 ogs_flow_t *flow2 = NULL;
-                                const char *dst_mac = "-";
-                                const char *src_mac = "-";
-                                char vid_str[8] = "-";
-                                char pcp_str[4] = "-";
-                                const char *eth_type = "-";
 
-                                eth_node = SubComponent->ethf_descs->first;
-                                if (eth_node)
-                                    eth_desc = eth_node->data;
+                                OpenAPI_list_for_each(
+                                        SubComponent->ethf_descs, eth_node) {
+                                    OpenAPI_eth_flow_description_t *eth_desc =
+                                        eth_node->data;
+                                    ogs_flow_t *flow = NULL;
+                                    const char *dst_mac = "-";
+                                    const char *src_mac = "-";
+                                    char vid_str[8] = "-";
+                                    char pcp_str[4] = "-";
+                                    const char *eth_type = "-";
 
-                                if (eth_desc) {
+                                    if (!eth_desc)
+                                        continue;
+
                                     if (eth_desc->dest_mac_addr)
                                         dst_mac = eth_desc->dest_mac_addr;
                                     if (eth_desc->source_mac_addr)
@@ -1178,18 +1186,23 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
                                         if (tag) {
                                             long tci = strtol(tag, NULL, 16);
                                             int vid = (int)(tci & 0x0FFF);
-                                            int pcp = (int)((tci >> 13) & 0x7);
+                                            int pcp = (int)
+                                                ((tci >> 13) & 0x7);
                                             ogs_snprintf(vid_str,
                                                 sizeof(vid_str), "%d", vid);
                                             ogs_snprintf(pcp_str,
                                                 sizeof(pcp_str), "%d", pcp);
                                         }
                                     }
-                                }
 
-                                /* Primary flow: TSN stream L2 filter */
-                                if (sub->num_of_flow <
-                                        (int)OGS_ARRAY_SIZE(sub->flow)) {
+                                    if (sub->num_of_flow >=
+                                            (int)OGS_ARRAY_SIZE(sub->flow)) {
+                                        ogs_error("[PCF] ethf_descs overflow "
+                                            "[%d]", sub->num_of_flow);
+                                        break;
+                                    }
+                                    /* One flow per stream: TSN L2 filter
+                                     * (TS 24.501 §9.11.4.13 Ethernet PF) */
                                     flow = &sub->flow[sub->num_of_flow];
                                     flow->description = ogs_msprintf(
                                         "eth|%s|%s|%s|%s|%s",
@@ -1198,12 +1211,14 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
                                     ogs_assert(flow->description);
                                     flow->direction = OGS_FLOW_BIDIRECTIONAL;
                                     sub->num_of_flow++;
-                                    ogs_info("[PCF] EthFlowDescription -> "
-                                        "L2 sentinel (TSN stream): %s",
+                                    ogs_info("[PCF] EthFlowDescription[%d] -> "
+                                        "L2 sentinel: %s",
+                                        sub->num_of_flow - 1,
                                         flow->description);
                                 }
 
-                                /* Secondary flow: gPTP (EtherType 0x88F7) */
+                                /* Secondary flow: gPTP (EtherType 0x88F7) —
+                                 * added once for all streams on this flow */
                                 if (sub->num_of_flow <
                                         (int)OGS_ARRAY_SIZE(sub->flow)) {
                                     flow2 = &sub->flow[sub->num_of_flow];
@@ -1808,30 +1823,40 @@ bool pcf_npcf_policyauthorization_handle_update(
                              * A second flow for gPTP (EtherType 0x88F7) is
                              * always added so gPTP sync packets are classified
                              * onto this QoS flow. */
+                            /* TS 29.514 §4.2.2.2 EthFlowDescription list:
+                             * iterate ALL entries so N TSN streams riding
+                             * ONE QFI2 flow each get their own L2 packet
+                             * filter (TS 23.501 §5.7.6 aggregation case).
+                             * gPTP is appended once after the per-stream
+                             * loop. */
                             if (sub->num_of_flow == 0 &&
                                     SubComponent->ethf_descs &&
                                     SubComponent->ethf_descs->count > 0) {
                                 OpenAPI_lnode_t *eth_node = NULL;
-                                OpenAPI_eth_flow_description_t *eth_desc = NULL;
-                                ogs_flow_t *flow = NULL;
                                 ogs_flow_t *flow2 = NULL;
-                                const char *dst_mac = "-";
-                                const char *src_mac = "-";
-                                char vid_str[8] = "-";
-                                char pcp_str[4] = "-";
-                                const char *eth_type = "-";
 
-                                eth_node = SubComponent->ethf_descs->first;
-                                if (eth_node)
-                                    eth_desc = eth_node->data;
+                                OpenAPI_list_for_each(
+                                        SubComponent->ethf_descs, eth_node) {
+                                    OpenAPI_eth_flow_description_t *eth_desc =
+                                        eth_node->data;
+                                    ogs_flow_t *flow = NULL;
+                                    const char *dst_mac = "-";
+                                    const char *src_mac = "-";
+                                    char vid_str[8] = "-";
+                                    char pcp_str[4] = "-";
+                                    const char *eth_type = "-";
 
-                                if (eth_desc) {
+                                    if (!eth_desc)
+                                        continue;
+
                                     if (eth_desc->dest_mac_addr)
                                         dst_mac = eth_desc->dest_mac_addr;
                                     if (eth_desc->source_mac_addr)
                                         src_mac = eth_desc->source_mac_addr;
                                     if (eth_desc->eth_type)
                                         eth_type = eth_desc->eth_type;
+                                    /* Decode first VLAN tag: 4-hex TCI string
+                                     * e.g. "A064" → PCP=5, VID=100 */
                                     if (eth_desc->vlan_tags &&
                                             eth_desc->vlan_tags->count > 0 &&
                                             eth_desc->vlan_tags->first) {
@@ -1841,18 +1866,23 @@ bool pcf_npcf_policyauthorization_handle_update(
                                         if (tag) {
                                             long tci = strtol(tag, NULL, 16);
                                             int vid = (int)(tci & 0x0FFF);
-                                            int pcp = (int)((tci >> 13) & 0x7);
+                                            int pcp = (int)
+                                                ((tci >> 13) & 0x7);
                                             ogs_snprintf(vid_str,
                                                 sizeof(vid_str), "%d", vid);
                                             ogs_snprintf(pcp_str,
                                                 sizeof(pcp_str), "%d", pcp);
                                         }
                                     }
-                                }
 
-                                /* Primary flow: TSN stream L2 filter */
-                                if (sub->num_of_flow <
-                                        (int)OGS_ARRAY_SIZE(sub->flow)) {
+                                    if (sub->num_of_flow >=
+                                            (int)OGS_ARRAY_SIZE(sub->flow)) {
+                                        ogs_error("[PCF] ethf_descs overflow "
+                                            "[%d]", sub->num_of_flow);
+                                        break;
+                                    }
+                                    /* One flow per stream: TSN L2 filter
+                                     * (TS 24.501 §9.11.4.13 Ethernet PF) */
                                     flow = &sub->flow[sub->num_of_flow];
                                     flow->description = ogs_msprintf(
                                         "eth|%s|%s|%s|%s|%s",
@@ -1861,12 +1891,14 @@ bool pcf_npcf_policyauthorization_handle_update(
                                     ogs_assert(flow->description);
                                     flow->direction = OGS_FLOW_BIDIRECTIONAL;
                                     sub->num_of_flow++;
-                                    ogs_info("[PCF] EthFlowDescription -> "
-                                        "L2 sentinel (TSN stream): %s",
+                                    ogs_info("[PCF] EthFlowDescription[%d] -> "
+                                        "L2 sentinel: %s",
+                                        sub->num_of_flow - 1,
                                         flow->description);
                                 }
 
-                                /* Secondary flow: gPTP (EtherType 0x88F7) */
+                                /* Secondary flow: gPTP (EtherType 0x88F7) —
+                                 * added once for all streams on this flow */
                                 if (sub->num_of_flow <
                                         (int)OGS_ARRAY_SIZE(sub->flow)) {
                                     flow2 = &sub->flow[sub->num_of_flow];
