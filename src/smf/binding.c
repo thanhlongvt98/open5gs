@@ -559,6 +559,20 @@ void smf_qos_flow_binding(smf_sess_t *sess)
             bool qos_presence = false;
 
             qos_flow = smf_qos_flow_find_by_pcc_rule_id(sess, pcc_rule->id);
+
+            /* TS 24.501 §6.4.3.2 / TS 23.502 §4.3.3: a second PCC rule that
+             * targets the same 5QI as an already-established dedicated QoS
+             * flow MUST add its packet filter(s) to that existing flow rather
+             * than create a new one.  Without this, smf_qos_flow_add() would
+             * allocate a fresh QFI, smf_qos_flow_binding() would set
+             * qos_flow_created=true → OGS_PFCP_MODIFY_CREATE, and n4-handler
+             * would emit ROC=1 (Create-New) instead of ROC=3 (Modify-Add-PF).
+             * NOTE: only dedicated flows (not the default bearer) are eligible
+             * targets — smf_qos_flow_find_by_5qi() skips the default bearer. */
+            if (!qos_flow && pcc_rule->qos.index != 0)
+                qos_flow = smf_qos_flow_find_by_5qi(
+                        sess, (uint8_t)pcc_rule->qos.index);
+
             if (!qos_flow) {
                 if (pcc_rule->num_of_flow == 0) {
                     /* TFT is mandatory in
@@ -641,7 +655,13 @@ void smf_qos_flow_binding(smf_sess_t *sess)
                 qos_flow_created = true;
 
             } else {
-                ogs_assert(strcmp(qos_flow->pcc_rule.id, pcc_rule->id) == 0);
+                /* The bearer may have been found either by pcc_rule.id (same
+                 * rule updated) or by 5QI (second flow targeting the same
+                 * dedicated bearer via smf_qos_flow_find_by_5qi).  Only assert
+                 * ID equality for the former case. */
+                ogs_assert(!qos_flow->pcc_rule.id ||
+                           strcmp(qos_flow->pcc_rule.id, pcc_rule->id) == 0 ||
+                           qos_flow->qos.index == (uint8_t)pcc_rule->qos.index);
 
                 /*
                  * Check if any MBR/GBR value is non-zero. This indicates that

@@ -2939,6 +2939,25 @@ smf_bearer_t *smf_qos_flow_find_by_pcc_rule_id(
     return NULL;
 }
 
+smf_bearer_t *smf_qos_flow_find_by_5qi(smf_sess_t *sess, uint8_t five_qi)
+{
+    smf_bearer_t *qos_flow = NULL;
+    smf_bearer_t *default_flow = smf_default_bearer_in_sess(sess);
+
+    ogs_assert(sess);
+
+    /* Skip the default bearer — its 5QI is the session-level QCI and must
+     * not absorb dedicated-flow packet filters (TS 23.501 §5.7.1). */
+    ogs_list_for_each(&sess->bearer_list, qos_flow) {
+        if (qos_flow == default_flow)
+            continue;
+        if (qos_flow->qos.index == five_qi)
+            return qos_flow;
+    }
+
+    return NULL;
+}
+
 smf_bearer_t *smf_bearer_add(smf_sess_t *sess)
 {
     smf_bearer_t *bearer = NULL;
