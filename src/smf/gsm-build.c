@@ -472,8 +472,25 @@ ogs_pkbuf_t *gsm_build_pdu_session_modification_command(
 
         ogs_list_for_each_entry(
                 &sess->qos_flow_to_modify_list, qos_flow, to_modify_node) {
+            uint8_t effective_code = qos_rule_code;
             ogs_assert(i < OGS_MAX_NUM_OF_BEARER);
-            gsm_encode_qos_rule(&qos_rule[i], qos_flow, qos_rule_code);
+            /* TS 24.501 §6.4.3.2 / Table 9.11.4.13.1:
+             * If a PMIC-triggered modification carries no new packet filters
+             * (pf_to_add_list is empty) but the flow already exists, sending
+             * CREATE_NEW_QOS_RULE (oc=1) with nb_pf=0 makes the UE wipe its
+             * existing packet filter list for that rule.  Substitute op-code 6
+             * (MODIFY_WITHOUT_MODIFYING_PACKET_FILTERS) which is a pure
+             * QoS-parameter update and leaves the UE's filter list intact. */
+            if (effective_code == OGS_NAS_QOS_CODE_CREATE_NEW_QOS_RULE &&
+                ogs_list_count(&qos_flow->pf_to_add_list) == 0) {
+                ogs_warn("[Fix-A] qfi=%d CREATE with empty pf_to_add_list in"
+                         " modify-command — downgrading to"
+                         " WITHOUT_MODIFYING_PACKET_FILTERS (oc=6)",
+                         qos_flow->qfi);
+                effective_code =
+                    OGS_NAS_QOS_CODE_MODIFY_EXISTING_QOS_RULE_WITHOUT_MODIFYING_PACKET_FILTERS;
+            }
+            gsm_encode_qos_rule(&qos_rule[i], qos_flow, effective_code);
             i++;
         }
 

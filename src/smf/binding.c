@@ -702,8 +702,26 @@ void smf_qos_flow_binding(smf_sess_t *sess)
          *
          * EPC: OGS_GTP2_TFT_CODE_ADD_PACKET_FILTERS_TO_EXISTING_TFT
          * 5GC: OGS_NAS_QOS_CODE_MODIFY_EXISTING_QOS_RULE_AND_ADD_PACKET_FILTERS
+         *
+         * Fix-B: Do NOT wipe pf_to_add_list when the existing flow is being
+         * updated with zero new flows (e.g. PMIC-only QoS refresh with
+         * flow_presence=0).  Wiping an in-flight list and then sending 0
+         * packet-filters in a subsequent CREATE causes the UE to purge its
+         * existing filter list (TS 24.501 §6.4.3.2).  Skip list-init and
+         * continue early; Fix-A in gsm-build.c converts any residual CREATE
+         * with empty list to WITHOUT_MODIFYING_PACKET_FILTERS as a second
+         * defence.
          */
-            ogs_list_init(&qos_flow->pf_to_add_list);
+            if (!qos_flow_created && pcc_rule->num_of_flow == 0) {
+                ogs_warn("[Fix-B] qfi=%d existing flow, num_of_flow=0 —"
+                         " skipping pf_to_add_list reset (PMIC-only update)",
+                         qos_flow->qfi);
+                /* Fall through to the existing no-op guard at line ~790 which
+                 * will emit "No need to send Session Modification Request" and
+                 * continue. */
+            } else {
+                ogs_list_init(&qos_flow->pf_to_add_list);
+            }
 
             for (j = 0; j < pcc_rule->num_of_flow; j++) {
                 ogs_flow_t *flow = &pcc_rule->flow[j];
