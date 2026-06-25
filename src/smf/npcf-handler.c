@@ -175,24 +175,21 @@ static void update_authorized_pcc_rule_and_qos(
         char *QosId = NULL;
         int i;
 
-        for (i = 0; i < sess->policy.num_of_pcc_rule; i++)
-            OGS_PCC_RULE_FREE(&sess->policy.pcc_rule[i]);
-        sess->policy.num_of_pcc_rule = 0;
-
+        /* TS 29.512 §4.2.6 delta-merge semantics:
+         *   - NULL value entry   → delete existing rule
+         *   - new key            → add new rule
+         *   - existing key       → update existing rule
+         *   - unmentioned rules  → KEEP (do NOT wipe)
+         *
+         * The old wipe-and-rebuild (num_of_pcc_rule = 0 + full loop) violated
+         * the last bullet: a 2nd AF app-session CREATE carries only the NEW
+         * PCC rule, so the first dedicated flow was silently evicted and its
+         * QoS flow left orphaned.  Fix: merge in-place. */
         OpenAPI_list_for_each(SmPolicyDecision->pcc_rules, node) {
             ogs_pcc_rule_t *pcc_rule = NULL;
-
-            if (sess->policy.num_of_pcc_rule >= OGS_MAX_NUM_OF_PCC_RULE) {
-                ogs_error("Too many PccRules [%d:%d]",
-                        sess->policy.num_of_pcc_rule + 1,
-                        OGS_MAX_NUM_OF_PCC_RULE);
-                break;
-            }
+            int existing_idx = -1;
 
             QosData = NULL;
-            pcc_rule =
-                &sess->policy.pcc_rule[sess->policy.num_of_pcc_rule];
-            ogs_assert(pcc_rule);
 
             PccRuleMap = node->data;
             if (!PccRuleMap) {
@@ -205,13 +202,44 @@ static void update_authorized_pcc_rule_and_qos(
                 continue;
             }
 
+            /* Find an existing slot with this rule id (update), or allocate
+             * a fresh slot at the end (new rule). */
+            for (i = 0; i < sess->policy.num_of_pcc_rule; i++) {
+                if (sess->policy.pcc_rule[i].id &&
+                        strcmp(sess->policy.pcc_rule[i].id,
+                               PccRuleMap->key) == 0) {
+                    existing_idx = i;
+                    break;
+                }
+            }
+
             PccRule = PccRuleMap->value;
             if (!PccRule) {
-                pcc_rule->type = OGS_PCC_RULE_TYPE_REMOVE;
-                pcc_rule->id = ogs_strdup(PccRuleMap->key);
-                ogs_assert(pcc_rule->id);
-
-                sess->policy.num_of_pcc_rule++;
+                /* NULL value → delete this rule (TS 29.512 §4.2.6 bullet 1) */
+                if (existing_idx >= 0) {
+                    /* Mark existing slot as REMOVE so smf_qos_flow_binding()
+                     * tears down the corresponding QoS flow. */
+                    OGS_PCC_RULE_FREE(&sess->policy.pcc_rule[existing_idx]);
+                    pcc_rule = &sess->policy.pcc_rule[existing_idx];
+                    pcc_rule->type = OGS_PCC_RULE_TYPE_REMOVE;
+                    pcc_rule->id = ogs_strdup(PccRuleMap->key);
+                    ogs_assert(pcc_rule->id);
+                } else {
+                    /* Rule not found locally — still need a REMOVE slot so
+                     * smf_qos_flow_binding() can clean up if the flow exists. */
+                    if (sess->policy.num_of_pcc_rule >= OGS_MAX_NUM_OF_PCC_RULE) {
+                        ogs_error("Too many PccRules [%d:%d]",
+                                sess->policy.num_of_pcc_rule + 1,
+                                OGS_MAX_NUM_OF_PCC_RULE);
+                        continue;
+                    }
+                    pcc_rule =
+                        &sess->policy.pcc_rule[sess->policy.num_of_pcc_rule];
+                    pcc_rule->type = OGS_PCC_RULE_TYPE_REMOVE;
+                    pcc_rule->id = ogs_strdup(PccRuleMap->key);
+                    ogs_assert(pcc_rule->id);
+                    sess->policy.num_of_pcc_rule++;
+                }
                 continue;
             }
 
@@ -269,6 +297,23 @@ static void update_authorized_pcc_rule_and_qos(
             if (!PccRule->pcc_rule_id) {
                 ogs_error("No PccRule->pcc_rule_id");
                 continue;
+            }
+
+            /* Resolve the target slot: update existing or append new. */
+            if (existing_idx >= 0) {
+                /* Update in-place: free the old rule content, reuse slot. */
+                OGS_PCC_RULE_FREE(&sess->policy.pcc_rule[existing_idx]);
+                pcc_rule = &sess->policy.pcc_rule[existing_idx];
+            } else {
+                /* New rule: append at end. */
+                if (sess->policy.num_of_pcc_rule >= OGS_MAX_NUM_OF_PCC_RULE) {
+                    ogs_error("Too many PccRules [%d:%d]",
+                            sess->policy.num_of_pcc_rule + 1,
+                            OGS_MAX_NUM_OF_PCC_RULE);
+                    continue;
+                }
+                pcc_rule =
+                    &sess->policy.pcc_rule[sess->policy.num_of_pcc_rule];
             }
 
             pcc_rule->type = OGS_PCC_RULE_TYPE_INSTALL;
@@ -482,7 +527,11 @@ static void update_authorized_pcc_rule_and_qos(
              * SMF-local TSC context. */
             smf_tsc_ingest_pcc_rule(sess, PccRule);
 
-            sess->policy.num_of_pcc_rule++;
+            /* Only advance the count when this is a truly new slot;
+             * updates to an existing slot (existing_idx >= 0) leave
+             * num_of_pcc_rule unchanged. */
+            if (existing_idx < 0)
+                sess->policy.num_of_pcc_rule++;
         }
     }
 
