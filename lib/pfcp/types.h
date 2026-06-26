@@ -1735,11 +1735,6 @@ int ogs_pfcp_encode_eth_packet_filter(
         ogs_pfcp_tlv_ethernet_packet_filter_t *tlv,
         const ogs_pf_content_t *c, uint32_t filter_id, bool is_bid,
         uint8_t *mac_buf, uint8_t *ctag_buf, uint8_t *ethertype_buf);
-typedef struct ogs_pfcp_rule_s ogs_pfcp_rule_t;
-int ogs_pfcp_parse_eth_packet_filter(
-        ogs_pfcp_rule_t *rule,
-        const ogs_pfcp_tlv_ethernet_packet_filter_t *tlv);
-
 #ifdef __cplusplus
 }
 #endif

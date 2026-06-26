@@ -850,10 +850,34 @@ static void _gtpv1_u_recv_cb(short when, ogs_socket_t fd, void *data)
             /* NW-TT UL VID/PCP observability (validate the per-flow 802.1Q tag out). */
             uint16_t ul_vid = 0;
             uint8_t ul_pcp = 0;
-            _get_vlan(pkbuf->data, pkbuf->len, &ul_vid, &ul_pcp);
+            bool ul_tagged = _get_vlan(pkbuf->data, pkbuf->len, &ul_vid, &ul_pcp);
             ogs_trace("[UPF] Ethernet UL class[%s] ethertype[0x%04x] vid[%u] pcp[%u] QFI[%d] "
                      "SEID[0x%llx]", upf_eth_class_str(klass), inner_eth_type, ul_vid, ul_pcp,
                      pdr->qfi, (unsigned long long)sess->upf_n4_seid);
+
+            /* [CP6ULQFI_DBG] Temporary diagnostic: localize UL Ethernet QFI mis-steering
+             * (whether frames arrive at UPF already on QFI=1 vs. QFI=2, and which PDR
+             * matched). Log first 20, then every 500th frame to avoid log floods.
+             * Strip once the TSN UL QFI bug is resolved. */
+            {
+                static uint32_t _cp6_ul_eth_cnt = 0;
+                _cp6_ul_eth_cnt++;
+                if (_cp6_ul_eth_cnt <= 20 || (_cp6_ul_eth_cnt % 500) == 0) {
+                    const uint8_t *dm = (pkbuf->len >= UPF_MAC_ALEN) ?
+                                        (const uint8_t *)pkbuf->data : NULL;
+                    ogs_info("[CP6ULQFI_DBG] UL eth frame #%u: "
+                             "gtp-qfi=%u pdr-id=%u pdr-qfi=%u eth-rule=%s "
+                             "dst-mac=%02x:%02x:%02x:%02x:%02x:%02x "
+                             "vid=%u pcp=%u (tagged=%s)",
+                             _cp6_ul_eth_cnt,
+                             (unsigned)header_desc.qos_flow_identifier,
+                             (unsigned)pdr->id, (unsigned)pdr->qfi,
+                             upf_pdr_has_eth_rule(pdr) ? "yes" : "no",
+                             dm ? dm[0] : 0, dm ? dm[1] : 0, dm ? dm[2] : 0,
+                             dm ? dm[3] : 0, dm ? dm[4] : 0, dm ? dm[5] : 0,
+                             ul_vid, ul_pcp, ul_tagged ? "yes" : "no");
+                }
+            }
         }
 
         /* NW-TT bridge UL egress. For an Ethernet PDU session
