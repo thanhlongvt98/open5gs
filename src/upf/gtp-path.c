@@ -159,15 +159,17 @@ static ogs_pfcp_dev_t *upf_eth_bridge_dev(void)
     return NULL;
 }
 
-/* Match a DL L2 frame against a parsed Ethernet packet filter (TS 24.501
+/* Match an L2 frame against a parsed Ethernet packet filter (TS 24.501
  * §9.11.4.13). All present components must match (logical AND). A VID or PCP
  * component on an untagged frame fails the match. Empty filter never matches.
  *
- * swap_mac: the AF/PCF emits the filter in UL-canonical form (dst-MAC = the
- * remote/NW endpoint) so the UE's UL classifier matches UL frames as-is. On the
- * DL (CORE) interface the remote endpoint is the frame's SOURCE, so the UPF
- * swaps the dst/src MAC comparison (TS 29.244 §5.2.1A.2A). VID/PCP/EtherType are
- * direction-independent and compared as-is. */
+ * swap_mac: the filter's DESTINATION_MAC component stores the stream destination
+ * (DS-TT port MAC = UE-side endpoint, from EthFlowDescription destMacAddr).
+ * For DL (CORE src_if) the DL frame DST is the DS-TT MAC — compare directly
+ * (swap_mac=false). For UL (ACCESS src_if) the UL frame SRC is the DS-TT MAC —
+ * pass swap_mac=true so the DESTINATION_MAC component is compared against the
+ * frame source (TS 29.244 §5.2.1A.2A). VID/PCP/EtherType are direction-
+ * independent and compared as-is in both cases. */
 static bool upf_eth_frame_matches(
         const ogs_pf_content_t *c, uint8_t *data, uint len, bool swap_mac)
 {
@@ -225,9 +227,8 @@ static bool upf_pdr_has_eth_rule(ogs_pfcp_pdr_t *pdr)
 }
 
 /* True if any of the PDR's Ethernet packet-filter rules matches the frame.
- * swap: DL (CORE) passes true (filter is UL-canonical, dst-MAC = remote = the
- * DL frame's source); UL (ACCESS) passes false (dst-MAC = the UL frame's dst).
- * See upf_eth_frame_matches (TS 29.244 §5.2.1A.2A). */
+ * swap: DL (CORE) passes false (filter DST_MAC = DL frame DST); UL (ACCESS)
+ * passes true (filter DST_MAC = UL frame SRC). See upf_eth_frame_matches. */
 static bool upf_eth_pdr_matches(
         ogs_pfcp_pdr_t *pdr, uint8_t *data, uint len, bool swap)
 {
@@ -277,11 +278,12 @@ static bool upf_eth_dl_forward(upf_sess_t *sess, ogs_pkbuf_t *pkbuf)
             continue;
 
         /* Candidate DL PDR: inspect its Ethernet packet-filter rules.
-         * DL (CORE): swap MAC (filter is UL-canonical). */
+         * DL (CORE): filter DST_MAC = DS-TT MAC = DL frame DST; no swap. */
         has_eth_filter = upf_pdr_has_eth_rule(pdr);
         if (has_eth_filter)
             eth_matched = upf_eth_pdr_matches(
-                    pdr, pkbuf->data, pkbuf->len, true /* DL: swap MAC */);
+                    pdr, pkbuf->data, pkbuf->len,
+                    false /* DL: filter DST_MAC matches frame DST */);
 
         if (has_eth_filter) {
             if (eth_matched && !selected_pdr)
@@ -782,15 +784,16 @@ static void _gtpv1_u_recv_cb(short when, ogs_socket_t fd, void *data)
                 /* Check if Rule List in PDR */
                 if (ogs_list_first(&pdr->rule_list)) {
                     if (upf_pdr_has_eth_rule(pdr)) {
-                        /* Ethernet PDU-session UL PDR: the SDF rule is an L2 eth
-                         * filter (is_eth), not an IP rule. ogs_pfcp_pdr_rule_
-                         * find_by_packet() is IP-only and treats an Ethernet
-                         * frame as "non-IP" → returns NULL → the frame would be
-                         * dropped with a GTP-U Error Indication. Match the eth
-                         * filter instead. UL (ACCESS): the filter is UL-canonical
-                         * (dst-MAC = remote = the UL frame's dst) → no MAC swap. */
+                        /* Ethernet PDU-session UL PDR (TS 24.501 §9.11.4.13):
+                         * ogs_pfcp_pdr_rule_find_by_packet() is IP-only and cannot
+                         * match L2 eth filters. The filter's DESTINATION_MAC stores
+                         * the stream destination (DS-TT MAC = UE endpoint), which
+                         * for a UL frame is the source address; pass swap_mac=true
+                         * to compare DESTINATION_MAC against the frame source
+                         * (TS 29.244 §5.2.1A.2A). */
                         if (!upf_eth_pdr_matches(
-                                pdr, pkbuf->data, pkbuf->len, false))
+                                pdr, pkbuf->data, pkbuf->len,
+                                true /* UL: filter DST_MAC = UL frame SRC */))
                             continue;
                     } else if (ogs_pfcp_pdr_rule_find_by_packet(
                                 pdr, pkbuf) == NULL) {
