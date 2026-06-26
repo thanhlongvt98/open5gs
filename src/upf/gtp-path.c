@@ -163,13 +163,13 @@ static ogs_pfcp_dev_t *upf_eth_bridge_dev(void)
  * §9.11.4.13). All present components must match (logical AND). A VID or PCP
  * component on an untagged frame fails the match. Empty filter never matches.
  *
- * swap_mac: the filter's DESTINATION_MAC component stores the stream destination
- * (DS-TT port MAC = UE-side endpoint, from EthFlowDescription destMacAddr).
- * For DL (CORE src_if) the DL frame DST is the DS-TT MAC — compare directly
- * (swap_mac=false). For UL (ACCESS src_if) the UL frame SRC is the DS-TT MAC —
- * pass swap_mac=true so the DESTINATION_MAC component is compared against the
- * frame source (TS 29.244 §5.2.1A.2A). VID/PCP/EtherType are direction-
- * independent and compared as-is in both cases. */
+ * swap_mac: the filter's DESTINATION_MAC component stores the NW-TT /
+ * peer-endpoint MAC (the network-side anchor, from EthFlowDescription
+ * destMacAddr). For DL (CORE src_if) the NW-TT MAC appears as the frame
+ * SOURCE — pass swap_mac=true so DESTINATION_MAC is compared against the
+ * frame source. For UL (ACCESS src_if) the NW-TT MAC appears as the frame
+ * DESTINATION — compare directly (swap_mac=false) (TS 29.244 §5.2.1A.2A).
+ * VID/PCP/EtherType are direction-independent and compared as-is. */
 static bool upf_eth_frame_matches(
         const ogs_pf_content_t *c, uint8_t *data, uint len, bool swap_mac)
 {
@@ -278,12 +278,13 @@ static bool upf_eth_dl_forward(upf_sess_t *sess, ogs_pkbuf_t *pkbuf)
             continue;
 
         /* Candidate DL PDR: inspect its Ethernet packet-filter rules.
-         * DL (CORE): filter DST_MAC = DS-TT MAC = DL frame DST; no swap. */
+         * DL (CORE): filter DESTINATION_MAC = NW-TT MAC = DL frame SRC;
+         * swap_mac=true to compare against the frame source. */
         has_eth_filter = upf_pdr_has_eth_rule(pdr);
         if (has_eth_filter)
             eth_matched = upf_eth_pdr_matches(
                     pdr, pkbuf->data, pkbuf->len,
-                    false /* DL: filter DST_MAC matches frame DST */);
+                    true /* DL: filter DESTINATION_MAC matches frame SRC */);
 
         if (has_eth_filter) {
             if (eth_matched && !selected_pdr)
@@ -787,13 +788,12 @@ static void _gtpv1_u_recv_cb(short when, ogs_socket_t fd, void *data)
                         /* Ethernet PDU-session UL PDR (TS 24.501 §9.11.4.13):
                          * ogs_pfcp_pdr_rule_find_by_packet() is IP-only and cannot
                          * match L2 eth filters. The filter's DESTINATION_MAC stores
-                         * the stream destination (DS-TT MAC = UE endpoint), which
-                         * for a UL frame is the source address; pass swap_mac=true
-                         * to compare DESTINATION_MAC against the frame source
-                         * (TS 29.244 §5.2.1A.2A). */
+                         * the NW-TT / peer-endpoint MAC; for a UL frame that MAC
+                         * appears as the frame destination — compare directly,
+                         * swap_mac=false (TS 29.244 §5.2.1A.2A). */
                         if (!upf_eth_pdr_matches(
                                 pdr, pkbuf->data, pkbuf->len,
-                                true /* UL: filter DST_MAC = UL frame SRC */))
+                                false /* UL: filter DESTINATION_MAC matches frame DST */))
                             continue;
                     } else if (ogs_pfcp_pdr_rule_find_by_packet(
                                 pdr, pkbuf) == NULL) {
