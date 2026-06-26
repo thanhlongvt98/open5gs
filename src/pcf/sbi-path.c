@@ -724,9 +724,8 @@ bool pcf_sbi_send_tsn_bridge_new_bridge(
     ogs_sockaddr_t *addr = NULL, *addr6 = NULL;
     const char *af_uri = NULL;
 
-    af_uri = getenv("TSN_AF_BRIDGE_URI");
-    if (!af_uri)
-        af_uri = "http://127.0.0.1:8080/new-bridge";
+    af_uri = pcf_self()->tsn_af_bridge_uri ?
+        pcf_self()->tsn_af_bridge_uri : "http://127.0.0.1:8080/new-bridge";
 
     rc = ogs_sbi_getaddr_from_uri(
             &scheme, &fqdn, &fqdn_port, &addr, &addr6, (char *)af_uri);

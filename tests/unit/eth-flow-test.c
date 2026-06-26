@@ -1,8 +1,3 @@
-/*
- * SPDX-FileCopyrightText: Copyright (C) 2026 Le Thanh Long
- * SPDX-License-Identifier: MIT
- */
-
 #include "ogs-sbi.h"
 #include "ipfw/ogs-ipfw.h"
 #include "pfcp/ogs-pfcp.h"
@@ -18,13 +13,13 @@ static void eth_flow_roundtrip_test(abts_case *tc, void *data)
     ABTS_INT_EQUAL(tc, 5, content.num_of_component);
 }
 
-static void test_eth_packet_filter_roundtrip(abts_case *tc, void *data)
+static void eth_packet_filter_roundtrip_test(abts_case *tc, void *data)
 {
     ogs_pf_content_t c;
     ogs_pfcp_tlv_ethernet_packet_filter_t tlv;
     ogs_pfcp_rule_t rule;
     uint8_t mac[13], ctag[3], etype[2];
-    int k;
+    int k, rv;
     bool found_dst = false, found_vid = false, found_etype = false;
 
     memset(&c, 0, sizeof(c));
@@ -50,7 +45,8 @@ static void test_eth_packet_filter_roundtrip(abts_case *tc, void *data)
     ABTS_TRUE(tc, tlv.c_tag.presence == 1);
     ABTS_TRUE(tc, tlv.ethertype.presence == 1);
 
-    ogs_pfcp_parse_eth_packet_filter(&rule, &tlv);
+    rv = ogs_pfcp_parse_eth_packet_filter(&rule, &tlv);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
 
     ABTS_TRUE(tc, rule.is_eth);
 
@@ -81,7 +77,7 @@ abts_suite *test_eth_flow(abts_suite *suite)
     suite = ADD_SUITE(suite)
 
     abts_run_test(suite, eth_flow_roundtrip_test, NULL);
-    abts_run_test(suite, test_eth_packet_filter_roundtrip, NULL);
+    abts_run_test(suite, eth_packet_filter_roundtrip_test, NULL);
 
     return suite;
 }

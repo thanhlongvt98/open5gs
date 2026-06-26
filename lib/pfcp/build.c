@@ -20,6 +20,11 @@
 #include "ogs-pfcp.h"
 #include "ipfw/ogs-ipfw.h"
 
+/* Ethernet PDU Session Information IE (TS 29.244 §8.2.117): a single octet
+ * whose bit 1 (ETHI) flags Ethernet PDU-session traffic. The data pointer
+ * must remain valid through ogs_pfcp_build_msg(), so this is file-static. */
+static const uint8_t ogs_pfcp_ethi = 0x01;
+
 ogs_pkbuf_t *ogs_pfcp_build_heartbeat_request(uint8_t type)
 {
     ogs_pfcp_message_t *pfcp_message = NULL;
@@ -310,9 +315,9 @@ static struct {
     ogs_pfcp_f_teid_t f_teid;
     char dnn[OGS_MAX_DNN_LEN+1];
     char *sdf_filter[OGS_MAX_NUM_OF_FLOW_IN_PDR];
-    uint8_t eth_mac_buf[13];
-    uint8_t eth_ctag_buf[3];
-    uint8_t eth_etype_buf[2];
+    uint8_t eth_mac_buf[8][13];
+    uint8_t eth_ctag_buf[8][3];
+    uint8_t eth_etype_buf[8][2];
 } pdrbuf[OGS_MAX_NUM_OF_PDR];
 
 void ogs_pfcp_pdrbuf_init(void)
@@ -337,6 +342,7 @@ void ogs_pfcp_build_create_pdr(
     ogs_pfcp_far_t *far = NULL;
     ogs_pfcp_sdf_filter_t pfcp_sdf_filter[OGS_MAX_NUM_OF_FLOW_IN_PDR];
     int j = 0;
+    int eth_j = 0;
     int len = 0;
 
     ogs_assert(message);
@@ -372,23 +378,32 @@ void ogs_pfcp_build_create_pdr(
     }
 
     memset(pfcp_sdf_filter, 0, sizeof(pfcp_sdf_filter));
+    eth_j = 0;
     for (j = 0; j < pdr->num_of_flow && j < OGS_MAX_NUM_OF_FLOW_IN_PDR; j++) {
         ogs_assert(pdr->flow[j].fd || pdr->flow[j].bid);
 
         /* Ethernet Packet Filter (TS 29.244 §5.13, type 132):
-         * flows with "eth|" sentinel are encoded as PFCP Ethernet
-         * Packet Filter IEs, not SDF Filter IEs. */
+         * flows with "eth|" sentinel are encoded as one PFCP Ethernet
+         * Packet Filter IE each, not as SDF Filter IEs. Multiple Ethernet
+         * filters (e.g. a TSN stream plus gPTP) occupy successive IEs. */
         if (pdr->flow[j].fd &&
                 strncmp(pdr->flow[j].description, "eth|", 4) == 0) {
             ogs_pf_content_t c;
+            if (eth_j >= (int)OGS_ARRAY_SIZE(message->pdi.ethernet_packet_filter)) {
+                ogs_error("Too many Ethernet Packet Filters in PDR");
+                continue;
+            }
             ogs_pf_content_from_eth_sentinel(
                     pdr->flow[j].description, &c);
-            ogs_pfcp_encode_eth_packet_filter(
-                    &message->pdi.ethernet_packet_filter, &c,
+            if (ogs_pfcp_encode_eth_packet_filter(
+                    &message->pdi.ethernet_packet_filter[eth_j], &c,
                     pdr->id, pdr->flow[j].bid,
-                    pdrbuf[i].eth_mac_buf,
-                    pdrbuf[i].eth_ctag_buf,
-                    pdrbuf[i].eth_etype_buf);
+                    pdrbuf[i].eth_mac_buf[eth_j],
+                    pdrbuf[i].eth_ctag_buf[eth_j],
+                    pdrbuf[i].eth_etype_buf[eth_j]) != OGS_OK) {
+                ogs_error("ogs_pfcp_encode_eth_packet_filter() failed");
+            }
+            eth_j++;
             continue;
         }
 
@@ -450,14 +465,11 @@ void ogs_pfcp_build_create_pdr(
     }
 
     if (pdr->ethernet_pdu_session_information) {
-        /* Ethernet PDU Session Information IE (TS 29.244 §8.2.117): a single
-         * octet whose bit 1 (ETHI) flags Ethernet PDU-session traffic. The data
-         * pointer must remain valid through ogs_pfcp_build_msg(), so reference a
-         * file-static constant. */
-        static const uint8_t ethi = 0x01;
         message->pdi.ethernet_pdu_session_information.presence = 1;
-        message->pdi.ethernet_pdu_session_information.data = (void *)&ethi;
-        message->pdi.ethernet_pdu_session_information.len = sizeof(ethi);
+        message->pdi.ethernet_pdu_session_information.data =
+                (void *)&ogs_pfcp_ethi;
+        message->pdi.ethernet_pdu_session_information.len =
+                sizeof(ogs_pfcp_ethi);
     }
 
     if (pdr->outer_header_removal_len) {
@@ -518,6 +530,7 @@ void ogs_pfcp_build_update_pdr(
 {
     ogs_pfcp_sdf_filter_t pfcp_sdf_filter[OGS_MAX_NUM_OF_FLOW_IN_PDR];
     int j = 0;
+    int eth_j = 0;
     int len = 0;
 
     ogs_assert(message);
@@ -547,23 +560,33 @@ void ogs_pfcp_build_update_pdr(
         }
 
         memset(pfcp_sdf_filter, 0, sizeof(pfcp_sdf_filter));
+        eth_j = 0;
         for (j = 0; j < pdr->num_of_flow && j < OGS_MAX_NUM_OF_FLOW_IN_PDR; j++) {
             ogs_assert(pdr->flow[j].fd || pdr->flow[j].bid);
 
             /* Ethernet Packet Filter (TS 29.244 §5.13, type 132):
-             * flows with "eth|" sentinel are encoded as PFCP Ethernet
-             * Packet Filter IEs, not SDF Filter IEs. */
+             * flows with "eth|" sentinel are encoded as one PFCP Ethernet
+             * Packet Filter IE each, not as SDF Filter IEs. Multiple Ethernet
+             * filters (e.g. a TSN stream plus gPTP) occupy successive IEs. */
             if (pdr->flow[j].fd &&
                     strncmp(pdr->flow[j].description, "eth|", 4) == 0) {
                 ogs_pf_content_t c;
+                if (eth_j >=
+                        (int)OGS_ARRAY_SIZE(message->pdi.ethernet_packet_filter)) {
+                    ogs_error("Too many Ethernet Packet Filters in PDR");
+                    continue;
+                }
                 ogs_pf_content_from_eth_sentinel(
                         pdr->flow[j].description, &c);
-                ogs_pfcp_encode_eth_packet_filter(
-                        &message->pdi.ethernet_packet_filter, &c,
+                if (ogs_pfcp_encode_eth_packet_filter(
+                        &message->pdi.ethernet_packet_filter[eth_j], &c,
                         pdr->id, pdr->flow[j].bid,
-                        pdrbuf[i].eth_mac_buf,
-                        pdrbuf[i].eth_ctag_buf,
-                        pdrbuf[i].eth_etype_buf);
+                        pdrbuf[i].eth_mac_buf[eth_j],
+                        pdrbuf[i].eth_ctag_buf[eth_j],
+                        pdrbuf[i].eth_etype_buf[eth_j]) != OGS_OK) {
+                    ogs_error("ogs_pfcp_encode_eth_packet_filter() failed");
+                }
+                eth_j++;
                 continue;
             }
 

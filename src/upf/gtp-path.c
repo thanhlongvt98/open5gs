@@ -92,6 +92,7 @@ static int check_framed_routes(upf_sess_t *sess, int family, uint32_t *addr)
 }
 
 #define ETHERTYPE_8021Q 0x8100  /* IEEE 802.1Q VLAN tag (TSN streams carry VID + PCP) */
+#define ETHERTYPE_GPTP  0x88F7  /* IEEE 802.1AS / 1588 gPTP (TS 23.501 §5.27.1.2.2.1) */
 
 /* Return the L3 EtherType, transparently peeling an 802.1Q VLAN tag if present, so a
  * tagged TSN frame classifies by its inner type (IP / gPTP) instead of 0x8100 -- this
@@ -109,11 +110,12 @@ static uint16_t _get_eth_type(uint8_t *data, uint len) {
 /* Extract the 802.1Q VID + PCP from a tagged frame; returns false if untagged.
  * TCI = PCP[3] | DEI[1] | VID[12] (IEEE 802.1Q). DS-TT/NW-TT per TS 23.501 §5.28.3. */
 static bool _get_vlan(const uint8_t *data, uint len, uint16_t *vid, uint8_t *pcp) {
+    uint16_t tci;
     if (len < ETHER_HDR_LEN + 4)
         return false;
     if (htobe16(*(const uint16_t *)(data + 12)) != ETHERTYPE_8021Q)
         return false;
-    uint16_t tci = htobe16(*(const uint16_t *)(data + ETHER_HDR_LEN));
+    tci = htobe16(*(const uint16_t *)(data + ETHER_HDR_LEN));
     if (vid)
         *vid = tci & 0x0FFF;
     if (pcp)
@@ -123,7 +125,6 @@ static bool _get_vlan(const uint8_t *data, uint len, uint16_t *vid, uint8_t *pcp
 
 /* UPF-local Ethernet fast-path classification (observability only).
  * Runs only for Ethernet PDU sessions (sess->correlation.ethernet). */
-#define ETHERTYPE_GPTP 0x88F7  /* IEEE 802.1AS / 1588 gPTP (TS 23.501 §5.27.1.2.2.1) */
 
 typedef enum {
     UPF_ETH_CLASS_HIT,           /* Ethernet frame on a matched PDR */
@@ -382,9 +383,10 @@ static void _gtpv1_tun_recv_common_cb(
             bool group_addr = (dst_mac[0] & 0x01); /* broadcast or multicast */
 
             /* NW-TT DL VID/PCP observability (validate the per-flow 802.1Q tag in). */
-            uint16_t dl_vid = 0; uint8_t dl_pcp = 0;
+            uint16_t dl_vid = 0;
+            uint8_t dl_pcp = 0;
             if (_get_vlan(recvbuf->data, recvbuf->len, &dl_vid, &dl_pcp))
-                ogs_info("[UPF] Ethernet DL vid[%u] pcp[%u] ethertype[0x%04x] %s",
+                ogs_trace("[UPF] Ethernet DL vid[%u] pcp[%u] ethertype[0x%04x] %s",
                          dl_vid, dl_pcp, _get_eth_type(recvbuf->data, recvbuf->len),
                          group_addr ? "(flood)" : "(unicast)");
 
@@ -846,9 +848,10 @@ static void _gtpv1_u_recv_cb(short when, ogs_socket_t fd, void *data)
             upf_eth_class_t klass = (inner_eth_type == ETHERTYPE_GPTP)
                 ? UPF_ETH_CLASS_GPTP : UPF_ETH_CLASS_HIT;
             /* NW-TT UL VID/PCP observability (validate the per-flow 802.1Q tag out). */
-            uint16_t ul_vid = 0; uint8_t ul_pcp = 0;
+            uint16_t ul_vid = 0;
+            uint8_t ul_pcp = 0;
             _get_vlan(pkbuf->data, pkbuf->len, &ul_vid, &ul_pcp);
-            ogs_info("[UPF] Ethernet UL class[%s] ethertype[0x%04x] vid[%u] pcp[%u] QFI[%d] "
+            ogs_trace("[UPF] Ethernet UL class[%s] ethertype[0x%04x] vid[%u] pcp[%u] QFI[%d] "
                      "SEID[0x%llx]", upf_eth_class_str(klass), inner_eth_type, ul_vid, ul_pcp,
                      pdr->qfi, (unsigned long long)sess->upf_n4_seid);
         }

@@ -633,7 +633,7 @@ void smf_qos_flow_binding(smf_sess_t *sess)
                  * (the NGAP TSC IE is omitted) — record it so the fallback
                  * success path is visible at the binding stage. */
                 if (sess->tsc && sess->tsc->qfi == qos_flow->qfi &&
-                        sess->tsc->status != TSC_STATUS_ACTIVE)
+                        sess->tsc->status != SMF_TSC_STATUS_ACTIVE)
                     ogs_info("[SMF] QoS flow QFI[%d] on baseline 5QI "
                              "(TSC status[%d])",
                              qos_flow->qfi, sess->tsc->status);

@@ -90,6 +90,7 @@ void smf_context_init(void)
             ogs_app()->pool.bearer * OGS_MAX_NUM_OF_FLOW_IN_BEARER);
 
     ogs_pool_init(&smf_sess_pool, ogs_app()->pool.sess);
+    smf_tsc_context_pool_init(ogs_app()->pool.sess);
     ogs_pool_init(&smf_n4_seid_pool, ogs_app()->pool.sess);
     ogs_pool_random_id_generate(&smf_n4_seid_pool);
 
@@ -135,6 +136,7 @@ void smf_context_final(void)
     ogs_pool_final(&smf_bearer_pool);
     ogs_pool_final(&smf_pf_pool);
 
+    smf_tsc_context_pool_final();
     ogs_pool_final(&smf_sess_pool);
     ogs_pool_final(&smf_n4_seid_pool);
 
@@ -3197,15 +3199,35 @@ void smf_bearer_tft_update(smf_bearer_t *bearer)
                 pf->flow_description;
             ul_pdr->num_of_flow++;
         } else if (pf->direction == OGS_FLOW_BIDIRECTIONAL) {
-            dl_pdr->flow[dl_pdr->num_of_flow].fd = 1;
-            dl_pdr->flow[dl_pdr->num_of_flow].description =
-                pf->flow_description;
-            dl_pdr->flow[dl_pdr->num_of_flow].bid = 1;
-            dl_pdr->flow[dl_pdr->num_of_flow].sdf_filter_id = pf->sdf_filter_id;
-            dl_pdr->num_of_flow++;
-            ul_pdr->flow[ul_pdr->num_of_flow].bid = 1;
-            ul_pdr->flow[ul_pdr->num_of_flow].sdf_filter_id = pf->sdf_filter_id;
-            ul_pdr->num_of_flow++;
+            if (pf->is_eth) {
+                /* TSN Ethernet packet filter (TS 29.244 §5.13): carried as an
+                 * Ethernet Packet Filter IE on both the downlink and uplink
+                 * PDR. The L2 match lives in the filter content (dst/src MAC,
+                 * C-TAG, EtherType), and the UP function applies the
+                 * per-direction MAC interpretation at match time
+                 * (TS 29.244 §5.2.1A.2A), so no bidirectional SDF Filter ID
+                 * linkage is used. */
+                dl_pdr->flow[dl_pdr->num_of_flow].fd = 1;
+                dl_pdr->flow[dl_pdr->num_of_flow].description =
+                    pf->flow_description;
+                dl_pdr->num_of_flow++;
+                ul_pdr->flow[ul_pdr->num_of_flow].fd = 1;
+                ul_pdr->flow[ul_pdr->num_of_flow].description =
+                    pf->flow_description;
+                ul_pdr->num_of_flow++;
+            } else {
+                dl_pdr->flow[dl_pdr->num_of_flow].fd = 1;
+                dl_pdr->flow[dl_pdr->num_of_flow].description =
+                    pf->flow_description;
+                dl_pdr->flow[dl_pdr->num_of_flow].bid = 1;
+                dl_pdr->flow[dl_pdr->num_of_flow].sdf_filter_id =
+                    pf->sdf_filter_id;
+                dl_pdr->num_of_flow++;
+                ul_pdr->flow[ul_pdr->num_of_flow].bid = 1;
+                ul_pdr->flow[ul_pdr->num_of_flow].sdf_filter_id =
+                    pf->sdf_filter_id;
+                ul_pdr->num_of_flow++;
+            }
         } else {
             ogs_fatal("Unsupported direction [%d]", pf->direction);
             ogs_assert_if_reached();

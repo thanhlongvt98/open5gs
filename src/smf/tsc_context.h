@@ -15,7 +15,7 @@
 #ifndef SMF_TSC_CONTEXT_H
 #define SMF_TSC_CONTEXT_H
 
-#include <stdint.h>
+#include "ogs-core.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -26,11 +26,17 @@ extern "C" {
 typedef struct smf_sess_s smf_sess_t;
 
 typedef enum {
-    TSC_STATUS_ACTIVE,      /* full TSC assistance present and valid     */
-    TSC_STATUS_PARTIAL,     /* some optional IEs absent, degraded hint   */
-    TSC_STATUS_DOWNGRADED,  /* unsupported field or peer limit triggered */
-    TSC_STATUS_ABSENT       /* no TSC assistance for this session        */
-} tsc_status_t;
+    SMF_TSC_DIR_UL,         /* uplink TSCAI flow only                    */
+    SMF_TSC_DIR_DL,         /* downlink TSCAI flow only                  */
+    SMF_TSC_DIR_BOTH        /* both uplink and downlink TSCAI flows      */
+} smf_tsc_dir_e;
+
+typedef enum {
+    SMF_TSC_STATUS_ACTIVE,      /* full TSC assistance present and valid     */
+    SMF_TSC_STATUS_PARTIAL,     /* some optional IEs absent, degraded hint   */
+    SMF_TSC_STATUS_DOWNGRADED,  /* unsupported field or peer limit triggered */
+    SMF_TSC_STATUS_ABSENT       /* no TSC assistance for this session        */
+} smf_tsc_status_e;
 
 typedef struct {
     /* TSCAI inputs (TS 23.501 R17 Table 5.27.2-1; from tscaiInputUl/Dl,
@@ -46,7 +52,7 @@ typedef struct {
      * single-time-domain deployment where the 5GS shares the external GM. */
     int64_t    clock_drift_offset_ns;
     uint32_t   survival_time_us;        /* TSCAI Survival Time; 0 = absent   */
-    enum { TSC_UL, TSC_DL, TSC_BOTH } direction;  /* TSCAI flow direction    */
+    smf_tsc_dir_e direction;            /* TSCAI flow direction               */
 
     /* QoS input — NOT part of TSCAI. Feeds the QoS MDBV characteristic
      * (TS 23.501 §5.7.3.7), not the TSC Assistance Information. */
@@ -57,9 +63,9 @@ typedef struct {
     uint32_t   pdu_session_id;
 
     /* Status */
-    tsc_status_t status;
-    char         downgrade_reason[128]; /* populated when DOWNGRADED         */
-} tsc_context_t;
+    smf_tsc_status_e status;
+    char             downgrade_reason[128]; /* populated when DOWNGRADED      */
+} smf_tsc_context_t;
 
 /*
  * Lifecycle helpers (defined in tsc_context.c).
@@ -74,23 +80,26 @@ typedef struct {
  * fires on PCF -> SMF ingestion.
  */
 /* Stable downgrade/partial reason strings (for scenario labeling). */
-#define TSC_REASON_NO_PERIODICITY \
+#define SMF_TSC_REASON_NO_PERIODICITY \
     "TSCAI missing mandatory periodicity; flow on baseline 5QI"
-#define TSC_REASON_PERIODICITY_RANGE \
+#define SMF_TSC_REASON_PERIODICITY_RANGE \
     "TSCAI periodicity exceeds NGAP max 640000 us; flow on baseline 5QI"
-#define TSC_REASON_RAN_GBR \
+#define SMF_TSC_REASON_RAN_GBR \
     "NG-RAN cannot guarantee GFBR (TS 23.501 5.7.2.4); flow on baseline 5QI"
 
-tsc_context_t *smf_sess_tsc_add(smf_sess_t *sess);
-void           smf_sess_tsc_remove(smf_sess_t *sess);
+void smf_tsc_context_pool_init(int size);
+void smf_tsc_context_pool_final(void);
+
+smf_tsc_context_t *smf_sess_tsc_add(smf_sess_t *sess);
+void               smf_sess_tsc_remove(smf_sess_t *sess);
 
 /*
  * Set the TSC status and record a concrete reason, logging the
  * outcome (ogs_warn for PARTIAL/DOWNGRADED, ogs_info otherwise) so the baseline
  * fallback is explicit in worklog/logs/. reason may be NULL for ACTIVE/ABSENT.
  */
-void smf_sess_tsc_set_status(tsc_context_t *tsc,
-        tsc_status_t status, const char *reason);
+void smf_sess_tsc_set_status(smf_tsc_context_t *tsc,
+        smf_tsc_status_e status, const char *reason);
 
 /*
  * Derive the RAN-facing TSCAI (5G clock domain) from the ingested context,
@@ -100,7 +109,7 @@ void smf_sess_tsc_set_status(tsc_context_t *tsc,
  * produced by the clock conversion; until then it is absent (*has_bat = false)
  * and never substituted with the TSN-domain value.
  */
-void smf_sess_tsc_derive(const tsc_context_t *tsc,
+void smf_sess_tsc_derive(const smf_tsc_context_t *tsc,
         uint32_t *periodicity_5g, uint64_t *bat_5g, bool *has_bat);
 
 #ifdef __cplusplus

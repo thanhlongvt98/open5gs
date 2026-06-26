@@ -10,3 +10,4 @@ webui/.next
 
 # clangd index cache (compile-commands workflow)
 .cache/
+.specs

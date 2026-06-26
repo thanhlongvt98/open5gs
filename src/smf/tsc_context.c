@@ -6,9 +6,19 @@
 
 #include "context.h"
 
-tsc_context_t *smf_sess_tsc_add(smf_sess_t *sess)
+static OGS_POOL(smf_tsc_context_pool, smf_tsc_context_t);
+
+void smf_tsc_context_pool_init(int size) {
+    ogs_pool_init(&smf_tsc_context_pool, size);
+}
+
+void smf_tsc_context_pool_final(void) {
+    ogs_pool_final(&smf_tsc_context_pool);
+}
+
+smf_tsc_context_t *smf_sess_tsc_add(smf_sess_t *sess)
 {
-    tsc_context_t *tsc = NULL;
+    smf_tsc_context_t *tsc = NULL;
 
     ogs_assert(sess);
 
@@ -16,13 +26,14 @@ tsc_context_t *smf_sess_tsc_add(smf_sess_t *sess)
     if (sess->tsc)
         return sess->tsc;
 
-    tsc = ogs_calloc(1, sizeof(*tsc));
+    ogs_pool_alloc(&smf_tsc_context_pool, &tsc);
     if (!tsc) {
-        ogs_error("ogs_calloc() failed");
+        ogs_error("ogs_pool_alloc() failed");
         return NULL;
     }
+    memset(tsc, 0, sizeof(*tsc));
 
-    tsc->status = TSC_STATUS_ABSENT;
+    tsc->status = SMF_TSC_STATUS_ABSENT;
     tsc->pdu_session_id = sess->psi;
 
     sess->tsc = tsc;
@@ -37,13 +48,13 @@ void smf_sess_tsc_remove(smf_sess_t *sess)
     ogs_assert(sess);
 
     if (sess->tsc) {
-        ogs_free(sess->tsc);
+        ogs_pool_free(&smf_tsc_context_pool, sess->tsc);
         sess->tsc = NULL;
     }
 }
 
-void smf_sess_tsc_set_status(tsc_context_t *tsc,
-        tsc_status_t status, const char *reason)
+void smf_sess_tsc_set_status(smf_tsc_context_t *tsc,
+        smf_tsc_status_e status, const char *reason)
 {
     ogs_assert(tsc);
 
@@ -51,16 +62,16 @@ void smf_sess_tsc_set_status(tsc_context_t *tsc,
     ogs_cpystrn(tsc->downgrade_reason, reason ? reason : "",
             sizeof(tsc->downgrade_reason));
 
-    if (status == TSC_STATUS_PARTIAL || status == TSC_STATUS_DOWNGRADED)
+    if (status == SMF_TSC_STATUS_PARTIAL || status == SMF_TSC_STATUS_DOWNGRADED)
         ogs_warn("[SMF] TSC %s: %s (periodicity[%llu us])",
-                status == TSC_STATUS_PARTIAL ? "PARTIAL" : "DOWNGRADED",
+                status == SMF_TSC_STATUS_PARTIAL ? "PARTIAL" : "DOWNGRADED",
                 tsc->downgrade_reason,
                 (unsigned long long)tsc->periodicity_us);
     else
         ogs_info("[SMF] TSC status[%d]", status);
 }
 
-void smf_sess_tsc_derive(const tsc_context_t *tsc,
+void smf_sess_tsc_derive(const smf_tsc_context_t *tsc,
         uint32_t *periodicity_5g, uint64_t *bat_5g, bool *has_bat)
 {
     ogs_assert(tsc);

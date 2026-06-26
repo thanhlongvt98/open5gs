@@ -1731,20 +1731,14 @@ ED3(uint8_t     spare:6;,
     };
 } __attribute__ ((packed)) ogs_pfcp_sereq_flags_t;
 
-/* Forward declarations for Ethernet Packet Filter encode/parse helpers.
- * Implemented in types.c; encode is called from build.c, parse from handler.c.
- * TS 29.244 §5.13 (Ethernet PDI) / §8.2.93-98 (individual IEs). */
-struct ogs_pfcp_tlv_ethernet_packet_filter_s;
-struct ogs_pfcp_rule_s;
-struct ogs_pf_content_s;
-
 int ogs_pfcp_encode_eth_packet_filter(
-        struct ogs_pfcp_tlv_ethernet_packet_filter_s *tlv,
-        const struct ogs_pf_content_s *c, uint32_t filter_id, bool is_bid,
+        ogs_pfcp_tlv_ethernet_packet_filter_t *tlv,
+        const ogs_pf_content_t *c, uint32_t filter_id, bool is_bid,
         uint8_t *mac_buf, uint8_t *ctag_buf, uint8_t *ethertype_buf);
+typedef struct ogs_pfcp_rule_s ogs_pfcp_rule_t;
 int ogs_pfcp_parse_eth_packet_filter(
-        struct ogs_pfcp_rule_s *rule,
-        const struct ogs_pfcp_tlv_ethernet_packet_filter_s *tlv);
+        ogs_pfcp_rule_t *rule,
+        const ogs_pfcp_tlv_ethernet_packet_filter_t *tlv);
 
 #ifdef __cplusplus
 }

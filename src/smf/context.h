@@ -679,7 +679,7 @@ typedef struct smf_sess_s {
     /* SMF-local TSC assistance state. NULL for baseline (non-TSC) sessions;
      * allocated by smf_sess_tsc_add() when TSC assistance arrives from the PCF.
      * Freed in smf_sess_remove(). */
-    tsc_context_t   *tsc;
+    smf_tsc_context_t   *tsc;
 
     /* 5GS-TSN-bridge port state (TS 29.244 create/created
      * bridge info for TSC). Set when the SMF requests a bridge port at PFCP

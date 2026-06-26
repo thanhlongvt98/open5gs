@@ -36,7 +36,7 @@ static void smf_tsc_ingest_pcc_rule(
         smf_sess_t *sess, OpenAPI_pcc_rule_t *PccRule)
 {
     OpenAPI_tscai_input_container_t *dl = NULL, *ul = NULL, *t = NULL;
-    tsc_context_t *tsc = NULL;
+    smf_tsc_context_t *tsc = NULL;
 
     ogs_assert(sess);
     ogs_assert(PccRule);
@@ -81,24 +81,24 @@ static void smf_tsc_ingest_pcc_rule(
     }
 
     if (dl && ul)
-        tsc->direction = TSC_BOTH;
+        tsc->direction = SMF_TSC_DIR_BOTH;
     else if (dl)
-        tsc->direction = TSC_DL;
+        tsc->direction = SMF_TSC_DIR_DL;
     else
-        tsc->direction = TSC_UL;
+        tsc->direction = SMF_TSC_DIR_UL;
 
     /* classify on the MANDATORY field. Periodicity is mandatory
      * (TS 38.413 §9.3.1.131); Burst Arrival Time is optional (absent until the
      * G-clock conversion), so its absence is NOT a downgrade. A flow
      * that is not ACTIVE omits the NGAP IE and runs on its 5QI. */
     if (!t->is_periodicity)
-        smf_sess_tsc_set_status(tsc, TSC_STATUS_PARTIAL,
-                TSC_REASON_NO_PERIODICITY);
+        smf_sess_tsc_set_status(tsc, SMF_TSC_STATUS_PARTIAL,
+                SMF_TSC_REASON_NO_PERIODICITY);
     else if (tsc->periodicity_us > 640000)
-        smf_sess_tsc_set_status(tsc, TSC_STATUS_DOWNGRADED,
-                TSC_REASON_PERIODICITY_RANGE);
+        smf_sess_tsc_set_status(tsc, SMF_TSC_STATUS_DOWNGRADED,
+                SMF_TSC_REASON_PERIODICITY_RANGE);
     else
-        smf_sess_tsc_set_status(tsc, TSC_STATUS_ACTIVE, NULL);
+        smf_sess_tsc_set_status(tsc, SMF_TSC_STATUS_ACTIVE, NULL);
 
     ogs_info("[SMF] TSC ingest: PSI[%d] dir[%d] periodicity[%llu us] "
              "survival[%u us] status[%d]",

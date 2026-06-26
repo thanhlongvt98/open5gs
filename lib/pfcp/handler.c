@@ -674,12 +674,21 @@ ogs_pfcp_pdr_t *ogs_pfcp_handle_create_pdr(ogs_pfcp_sess_t *sess,
         }
     }
 
-    /* Ethernet Packet Filter (TS 29.244 §5.13, type 132) */
-    if (message->pdi.ethernet_packet_filter.presence) {
-        ogs_pfcp_rule_t *eth_rule = ogs_pfcp_rule_add(pdr);
+    /* Ethernet Packet Filter (TS 29.244 §5.13, type 132). Each IE is one L2
+     * filter (e.g. a TSN stream and gPTP arrive as separate IEs); install one
+     * Ethernet rule per IE so the UPF can match every TSN-stream identity. */
+    for (i = 0; i < ogs_min(
+                OGS_ARRAY_SIZE(message->pdi.ethernet_packet_filter),
+                OGS_MAX_NUM_OF_FLOW_IN_PDR); i++) {
+        ogs_pfcp_rule_t *eth_rule = NULL;
+
+        if (message->pdi.ethernet_packet_filter[i].presence == 0)
+            break;
+
+        eth_rule = ogs_pfcp_rule_add(pdr);
         ogs_assert(eth_rule);
         rv = ogs_pfcp_parse_eth_packet_filter(
-                eth_rule, &message->pdi.ethernet_packet_filter);
+                eth_rule, &message->pdi.ethernet_packet_filter[i]);
         if (rv != OGS_OK) {
             ogs_error("ogs_pfcp_parse_eth_packet_filter() failed");
             ogs_pfcp_rule_remove(eth_rule);
@@ -1093,12 +1102,22 @@ ogs_pfcp_pdr_t *ogs_pfcp_handle_update_pdr(ogs_pfcp_sess_t *sess,
             }
         }
 
-        /* Ethernet Packet Filter (TS 29.244 §5.13, type 132) */
-        if (message->pdi.ethernet_packet_filter.presence) {
-            ogs_pfcp_rule_t *eth_rule = ogs_pfcp_rule_add(pdr);
+        /* Ethernet Packet Filter (TS 29.244 §5.13, type 132). Each IE is one L2
+         * filter (e.g. a TSN stream and gPTP arrive as separate IEs); install
+         * one Ethernet rule per IE so the UPF can match every TSN-stream
+         * identity. */
+        for (i = 0; i < ogs_min(
+                    OGS_ARRAY_SIZE(message->pdi.ethernet_packet_filter),
+                    OGS_MAX_NUM_OF_FLOW_IN_PDR); i++) {
+            ogs_pfcp_rule_t *eth_rule = NULL;
+
+            if (message->pdi.ethernet_packet_filter[i].presence == 0)
+                break;
+
+            eth_rule = ogs_pfcp_rule_add(pdr);
             ogs_assert(eth_rule);
             rv = ogs_pfcp_parse_eth_packet_filter(
-                    eth_rule, &message->pdi.ethernet_packet_filter);
+                    eth_rule, &message->pdi.ethernet_packet_filter[i]);
             if (rv != OGS_OK) {
                 ogs_error("ogs_pfcp_parse_eth_packet_filter() failed");
                 ogs_pfcp_rule_remove(eth_rule);
