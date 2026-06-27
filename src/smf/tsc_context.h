@@ -21,9 +21,14 @@
 extern "C" {
 #endif
 
+/* TS 29.512 PccRule.pccRuleId — no explicit max in the API schema; sized for
+ * lab/PCF rule identifiers. */
+#define OGS_MAX_PCC_RULE_ID_LEN         64
+
 /* Forward declaration only — avoids a circular include with context.h, which
  * includes this header. */
 typedef struct smf_sess_s smf_sess_t;
+typedef struct smf_bearer_s smf_bearer_t;
 
 typedef enum {
     SMF_TSC_DIR_UL,         /* uplink TSCAI flow only                    */
@@ -58,13 +63,18 @@ typedef struct {
      * (TS 23.501 §5.7.3.7), not the TSC Assistance Information. */
     uint32_t   burst_size_bytes;        /* TSN max burst -> MDBV derivation  */
 
-    /* Binding to the SMF session / QoS flow */
+    /* Binding to the SMF session / QoS flow (TS 23.501 §5.27.2 / TS 29.512) */
+    char       pcc_rule_id[OGS_MAX_PCC_RULE_ID_LEN + 1];
     uint8_t    qfi;
     uint32_t   pdu_session_id;
 
     /* Status */
     smf_tsc_status_e status;
     char             downgrade_reason[128]; /* populated when DOWNGRADED      */
+
+    /* Set true when NGAP modify transfer actually carries TSC Traffic
+     * Characteristics for this session (ngap-build.c modify paths). */
+    bool             n2_tsc_encoded;
 } smf_tsc_context_t;
 
 /*
@@ -86,6 +96,9 @@ typedef struct {
     "TSCAI periodicity exceeds NGAP max 640000 us; flow on baseline 5QI"
 #define SMF_TSC_REASON_RAN_GBR \
     "NG-RAN cannot guarantee GFBR (TS 23.501 5.7.2.4); flow on baseline 5QI"
+
+/* Standardized delay-critical GBR 5QI for TSN (TS 23.501 Table 5.7.4-1). */
+#define SMF_TSC_GBR_5QI 85
 
 void smf_tsc_context_pool_init(int size);
 void smf_tsc_context_pool_final(void);
@@ -111,6 +124,29 @@ void smf_sess_tsc_set_status(smf_tsc_context_t *tsc,
  */
 void smf_sess_tsc_derive(const smf_tsc_context_t *tsc,
         uint32_t *periodicity_5g, uint64_t *bat_5g, bool *has_bat);
+
+/*
+ * Bind sess->tsc->qfi to the QoS flow that carries TSC assistance (TS 23.501
+ * §5.27.2): PCC rule id on the bearer list, then on qos_flow_to_modify_list,
+ * then the sole delay-critical GBR (5QI 85) flow as last resort. No-op when TSC
+ * is absent, not ACTIVE, or qfi is already set.
+ */
+void smf_tsc_bind_qfi(smf_sess_t *sess);
+
+/*
+ * Return true when TSC Traffic Characteristics should be encoded on this QoS
+ * flow in an NGAP modify transfer. Re-binds qfi to the delay-critical GBR
+ * (5QI 85) bearer when pcc_rule_id matches (or is unset) even if qfi was
+ * previously bound to a different flow.
+ */
+bool smf_tsc_ngap_encode_on_qos_flow(
+        smf_sess_t *sess, smf_bearer_t *qos_flow);
+
+/*
+ * Send a network-requested N1N2 modify with only the TSC GBR QoS flow when
+ * TSC is ACTIVE but n2_tsc_encoded is still false. Returns true if sent.
+ */
+bool smf_tsc_send_n2_follow_up_if_needed(smf_sess_t *sess);
 
 #ifdef __cplusplus
 }

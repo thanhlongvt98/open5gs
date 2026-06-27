@@ -5,6 +5,9 @@
  */
 
 #include "context.h"
+#include "gsm-build.h"
+#include "ngap-build.h"
+#include "sbi-path.h"
 
 static OGS_POOL(smf_tsc_context_pool, smf_tsc_context_t);
 
@@ -86,4 +89,266 @@ void smf_sess_tsc_derive(const smf_tsc_context_t *tsc,
      * drift conversion). The raw TSN-domain value is never emitted. */
     *has_bat = (tsc->burst_arrival_time_5g != 0);
     *bat_5g = tsc->burst_arrival_time_5g;
+}
+
+static int smf_tsc_count_gbr_bearers(smf_sess_t *sess)
+{
+    smf_bearer_t *qos_flow = NULL;
+    int count = 0;
+
+    ogs_assert(sess);
+
+    ogs_list_for_each(&sess->bearer_list, qos_flow) {
+        if (qos_flow->qos.index == SMF_TSC_GBR_5QI)
+            count++;
+    }
+
+    ogs_list_for_each_entry(&sess->qos_flow_to_modify_list,
+            qos_flow, to_modify_node) {
+        smf_bearer_t *existing = NULL;
+        bool in_bearer_list = false;
+
+        if (qos_flow->qos.index != SMF_TSC_GBR_5QI)
+            continue;
+
+        ogs_list_for_each(&sess->bearer_list, existing) {
+            if (existing == qos_flow) {
+                in_bearer_list = true;
+                break;
+            }
+        }
+        if (!in_bearer_list)
+            count++;
+    }
+
+    return count;
+}
+
+static smf_bearer_t *smf_tsc_find_qos_flow_by_5qi(
+        smf_sess_t *sess, uint8_t five_qi)
+{
+    smf_bearer_t *qos_flow = NULL;
+    smf_bearer_t *candidate = NULL;
+    int match_count = 0;
+
+    ogs_assert(sess);
+
+    if (ogs_list_count(&sess->qos_flow_to_modify_list) > 0) {
+        ogs_list_for_each_entry(&sess->qos_flow_to_modify_list,
+                qos_flow, to_modify_node) {
+            if (qos_flow->qos.index == five_qi) {
+                candidate = qos_flow;
+                match_count++;
+            }
+        }
+        if (match_count == 1)
+            return candidate;
+    }
+
+    candidate = NULL;
+    match_count = 0;
+    ogs_list_for_each(&sess->bearer_list, qos_flow) {
+        if (qos_flow->qos.index == five_qi) {
+            candidate = qos_flow;
+            match_count++;
+        }
+    }
+    if (match_count == 1)
+        return candidate;
+
+    return NULL;
+}
+
+void smf_tsc_bind_qfi(smf_sess_t *sess)
+{
+    smf_bearer_t *tsc_qos_flow = NULL;
+    smf_bearer_t *qos_flow = NULL;
+    smf_bearer_t *candidate = NULL;
+    int match_count = 0;
+    uint8_t previous_qfi = 0;
+
+    ogs_assert(sess);
+
+    if (!sess->tsc) {
+        ogs_debug("[SMF] CP6_DBG tsc_qfi_bind_skip: PSI[%d] reason=no_tsc",
+                sess->psi);
+        return;
+    }
+    if (sess->tsc->status != SMF_TSC_STATUS_ACTIVE) {
+        ogs_debug("[SMF] CP6_DBG tsc_qfi_bind_skip: PSI[%d] reason=not_active "
+                "status[%d]", sess->psi, sess->tsc->status);
+        return;
+    }
+
+    previous_qfi = sess->tsc->qfi;
+
+    if (sess->tsc->pcc_rule_id[0] != '\0') {
+        tsc_qos_flow = smf_qos_flow_find_by_pcc_rule_id(
+                sess, sess->tsc->pcc_rule_id);
+        if (!tsc_qos_flow &&
+                ogs_list_count(&sess->qos_flow_to_modify_list) > 0) {
+            candidate = NULL;
+            match_count = 0;
+            ogs_list_for_each_entry(&sess->qos_flow_to_modify_list,
+                    qos_flow, to_modify_node) {
+                if (qos_flow->pcc_rule.id &&
+                        strcmp(qos_flow->pcc_rule.id,
+                            sess->tsc->pcc_rule_id) == 0) {
+                    candidate = qos_flow;
+                    match_count++;
+                }
+            }
+            if (match_count == 1)
+                tsc_qos_flow = candidate;
+        }
+    }
+
+    if (!tsc_qos_flow && sess->tsc->pcc_rule_id[0] != '\0' &&
+            smf_tsc_count_gbr_bearers(sess) == 1) {
+        ogs_list_for_each(&sess->bearer_list, qos_flow) {
+            if (qos_flow->qos.index == SMF_TSC_GBR_5QI) {
+                tsc_qos_flow = qos_flow;
+                break;
+            }
+        }
+        if (!tsc_qos_flow) {
+            ogs_list_for_each_entry(&sess->qos_flow_to_modify_list,
+                    qos_flow, to_modify_node) {
+                if (qos_flow->qos.index == SMF_TSC_GBR_5QI) {
+                    tsc_qos_flow = qos_flow;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (!tsc_qos_flow)
+        tsc_qos_flow = smf_tsc_find_qos_flow_by_5qi(sess, SMF_TSC_GBR_5QI);
+
+    if (tsc_qos_flow) {
+        sess->tsc->qfi = tsc_qos_flow->qfi;
+        if (previous_qfi != tsc_qos_flow->qfi) {
+            ogs_info("[SMF] CP6_DBG tsc_qfi_bind: PSI[%d] pcc_rule_id[%s] "
+                     "qfi[%d]", sess->psi, sess->tsc->pcc_rule_id,
+                     tsc_qos_flow->qfi);
+        }
+    } else {
+        ogs_info("[SMF] CP6_DBG tsc_qfi_bind_fail: PSI[%d] reason=no_bearer "
+                 "pcc_rule_id[%s]", sess->psi, sess->tsc->pcc_rule_id);
+    }
+}
+
+bool smf_tsc_ngap_encode_on_qos_flow(
+        smf_sess_t *sess, smf_bearer_t *qos_flow)
+{
+    ogs_assert(sess);
+    ogs_assert(qos_flow);
+
+    if (!sess->tsc || sess->tsc->status != SMF_TSC_STATUS_ACTIVE) {
+        ogs_info("[SMF] CP6_DBG tsc_encode_skip: PSI[%d] qfi[%d] "
+                 "reason=not_active", sess->psi, qos_flow->qfi);
+        return false;
+    }
+
+    if (qos_flow->qfi == sess->tsc->qfi)
+        return true;
+
+    if (qos_flow->qos.index != SMF_TSC_GBR_5QI) {
+        ogs_info("[SMF] CP6_DBG tsc_encode_skip: PSI[%d] qfi[%d] "
+                 "reason=not_gbr", sess->psi, qos_flow->qfi);
+        return false;
+    }
+
+    if (sess->tsc->pcc_rule_id[0] != '\0') {
+        if (!qos_flow->pcc_rule.id ||
+                strcmp(qos_flow->pcc_rule.id, sess->tsc->pcc_rule_id) != 0) {
+            if (smf_tsc_count_gbr_bearers(sess) == 1) {
+                sess->tsc->qfi = qos_flow->qfi;
+                ogs_info("[SMF] CP6_DBG tsc_encode_single_gbr_fallback: "
+                         "PSI[%d] qfi[%d] tsc_pcc[%s] flow_pcc[%s]",
+                         sess->psi, qos_flow->qfi, sess->tsc->pcc_rule_id,
+                         qos_flow->pcc_rule.id ? qos_flow->pcc_rule.id : "");
+                return true;
+            }
+            ogs_info("[SMF] CP6_DBG tsc_encode_skip: PSI[%d] qfi[%d] "
+                     "reason=pcc_mismatch tsc_pcc[%s] flow_pcc[%s]",
+                     sess->psi, qos_flow->qfi, sess->tsc->pcc_rule_id,
+                     qos_flow->pcc_rule.id ? qos_flow->pcc_rule.id : "");
+            return false;
+        }
+    }
+
+    sess->tsc->qfi = qos_flow->qfi;
+    ogs_info("[SMF] CP6_DBG tsc_qfi_bind: PSI[%d] pcc_rule_id[%s] qfi[%d]",
+             sess->psi, sess->tsc->pcc_rule_id, qos_flow->qfi);
+    return true;
+}
+
+static smf_bearer_t *smf_tsc_find_gbr_qos_flow(smf_sess_t *sess)
+{
+    smf_bearer_t *tsc_qos_flow = NULL;
+
+    ogs_assert(sess);
+
+    if (!sess->tsc || sess->tsc->status != SMF_TSC_STATUS_ACTIVE)
+        return NULL;
+
+    if (sess->tsc->qfi != 0)
+        tsc_qos_flow = smf_qos_flow_find_by_qfi(sess, sess->tsc->qfi);
+    if (!tsc_qos_flow && sess->tsc->pcc_rule_id[0] != '\0')
+        tsc_qos_flow = smf_qos_flow_find_by_pcc_rule_id(
+                sess, sess->tsc->pcc_rule_id);
+    if (!tsc_qos_flow)
+        tsc_qos_flow = smf_tsc_find_qos_flow_by_5qi(sess, SMF_TSC_GBR_5QI);
+
+    return tsc_qos_flow;
+}
+
+bool smf_tsc_send_n2_follow_up_if_needed(smf_sess_t *sess)
+{
+    smf_bearer_t *tsc_qos_flow = NULL;
+    smf_n1_n2_message_transfer_param_t param;
+
+    ogs_assert(sess);
+
+    if (!sess->tsc || sess->tsc->status != SMF_TSC_STATUS_ACTIVE) {
+        ogs_info("[SMF] CP6_DBG tsc_follow_up_skip: PSI[%d] reason=not_active",
+                sess->psi);
+        return false;
+    }
+    if (sess->tsc->n2_tsc_encoded) {
+        ogs_info("[SMF] CP6_DBG tsc_follow_up_skip: PSI[%d] "
+                 "reason=already_encoded", sess->psi);
+        return false;
+    }
+
+    tsc_qos_flow = smf_tsc_find_gbr_qos_flow(sess);
+    if (!tsc_qos_flow) {
+        ogs_info("[SMF] CP6_DBG tsc_follow_up_skip: PSI[%d] reason=no_gbr_flow",
+                sess->psi);
+        return false;
+    }
+
+    ogs_info("[SMF] CP6_DBG tsc_follow_up_n1n2: PSI[%d] qfi[%d]",
+            sess->psi, tsc_qos_flow->qfi);
+
+    sess->tsc->n2_tsc_encoded = false;
+
+    ogs_list_init(&sess->qos_flow_to_modify_list);
+    ogs_list_add(&sess->qos_flow_to_modify_list, &tsc_qos_flow->to_modify_node);
+
+    sess->pti = OGS_NAS_PROCEDURE_TRANSACTION_IDENTITY_UNASSIGNED;
+    memset(&param, 0, sizeof(param));
+    param.state = SMF_NETWORK_REQUESTED_QOS_FLOW_MODIFICATION;
+    param.n1smbuf = gsm_build_pdu_session_modification_command(sess, 0, 0);
+    ogs_assert(param.n1smbuf);
+    param.n2smbuf =
+        ngap_build_pdu_session_resource_modify_request_transfer(sess, true);
+    ogs_assert(param.n2smbuf);
+
+    smf_namf_comm_send_n1_n2_message_transfer(sess, NULL, &param);
+
+    ogs_list_init(&sess->qos_flow_to_modify_list);
+
+    return true;
 }

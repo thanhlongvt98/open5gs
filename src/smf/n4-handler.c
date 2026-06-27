@@ -1015,12 +1015,15 @@ void smf_5gc_n4_handle_session_modification_response(
                     OGS_NAS_QOS_CODE_CREATE_NEW_QOS_RULE,
                     OGS_NAS_CREATE_NEW_QOS_FLOW_DESCRIPTION);
             ogs_assert(param.n1smbuf);
+            smf_tsc_bind_qfi(sess);
             param.n2smbuf =
                 ngap_build_pdu_session_resource_modify_request_transfer(
                         sess, true);
             ogs_assert(param.n2smbuf);
 
             smf_namf_comm_send_n1_n2_message_transfer(sess, NULL, &param);
+
+            smf_tsc_send_n2_follow_up_if_needed(sess);
 
         } else {
             ogs_fatal("Unknown flags [0x%llx]", (long long)flags);
@@ -1060,6 +1063,7 @@ void smf_5gc_n4_handle_session_modification_response(
             param.n1smbuf = gsm_build_pdu_session_modification_command(
                     sess, qos_rule_code, qos_flow_description_code);
             ogs_assert(param.n1smbuf);
+            smf_tsc_bind_qfi(sess);
             param.n2smbuf =
                 ngap_build_pdu_session_resource_modify_request_transfer(
                     sess,
@@ -1067,6 +1071,8 @@ void smf_5gc_n4_handle_session_modification_response(
             ogs_assert(param.n2smbuf);
 
             smf_namf_comm_send_n1_n2_message_transfer(sess, NULL, &param);
+
+            smf_tsc_send_n2_follow_up_if_needed(sess);
 
         } else if (flags & OGS_PFCP_MODIFY_UE_REQUESTED) {
             ogs_pkbuf_t *n1smbuf = NULL, *n2smbuf = NULL;
@@ -1078,6 +1084,7 @@ void smf_5gc_n4_handle_session_modification_response(
                     sess, qos_rule_code, qos_flow_description_code);
             ogs_assert(n1smbuf);
 
+            smf_tsc_bind_qfi(sess);
             n2smbuf = ngap_build_pdu_session_resource_modify_request_transfer(
                     sess,
                     (flags & OGS_PFCP_MODIFY_QOS_MODIFY) ? true : false);
