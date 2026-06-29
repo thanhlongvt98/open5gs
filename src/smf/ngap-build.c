@@ -63,6 +63,15 @@ static const smf_cn_pdb_t *smf_cn_pdb_lookup(uint8_t five_qi)
     return NULL;
 }
 
+static void smf_ngap_log_tsc_qfi_skip(smf_sess_t *sess, uint8_t flow_qfi)
+{
+    if (sess->tsc && sess->tsc->status == SMF_TSC_STATUS_ACTIVE &&
+            flow_qfi != sess->tsc->qfi)
+        ogs_info("[SMF] CP6_DBG ngap_tsc_skip: flow_qfi[%d] tsc_qfi[%d] "
+                 "tsc_pcc_rule[%s]",
+                 flow_qfi, sess->tsc->qfi, sess->tsc->pcc_rule_id);
+}
+
 /*
  * Build one NGAP TSC Assistance Information (TS 38.413 §9.3.1.131) from the
  * SMF-local TSC context, for a single direction. Carries the mandatory
@@ -71,7 +80,7 @@ static const smf_cn_pdb_t *smf_cn_pdb_lookup(uint8_t five_qi)
  * when present.
  */
 static NGAP_TSCAssistanceInformation_t *smf_ngap_build_tsc_assistance(
-        const tsc_context_t *tsc)
+        const smf_tsc_context_t *tsc)
 {
     NGAP_TSCAssistanceInformation_t *tscai = NULL;
     uint32_t periodicity_5g = 0;
@@ -589,7 +598,8 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_setup_request_transfer(
         /* Attach TSC Traffic Characteristics (id 196) on this QoS Flow Setup
          * Request Item when the session carries TSC assistance for this QFI.
          * Direction selects the DL/UL sub-IE(s). Baseline flows add nothing. */
-        if (sess->tsc && sess->tsc->status == TSC_STATUS_ACTIVE &&
+        smf_ngap_log_tsc_qfi_skip(sess, qos_flow->qfi);
+        if (sess->tsc && sess->tsc->status == SMF_TSC_STATUS_ACTIVE &&
                 qos_flow->qfi == sess->tsc->qfi) {
             NGAP_ProtocolExtensionContainer_11905P280_t *tscExtContainer = NULL;
             NGAP_QosFlowSetupRequestItem_ExtIEs_t *tscExtIe = NULL;
@@ -613,12 +623,12 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_setup_request_transfer(
             TSCTrafficCharacteristics =
                 &tscExtIe->extensionValue.choice.TSCTrafficCharacteristics;
 
-            if (sess->tsc->direction == TSC_DL ||
-                    sess->tsc->direction == TSC_BOTH)
+            if (sess->tsc->direction == SMF_TSC_DIR_DL ||
+                    sess->tsc->direction == SMF_TSC_DIR_BOTH)
                 TSCTrafficCharacteristics->tSCAssistanceInformationDL =
                     smf_ngap_build_tsc_assistance(sess->tsc);
-            if (sess->tsc->direction == TSC_UL ||
-                    sess->tsc->direction == TSC_BOTH)
+            if (sess->tsc->direction == SMF_TSC_DIR_UL ||
+                    sess->tsc->direction == SMF_TSC_DIR_BOTH)
                 TSCTrafficCharacteristics->tSCAssistanceInformationUL =
                     smf_ngap_build_tsc_assistance(sess->tsc);
 
@@ -626,7 +636,7 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_setup_request_transfer(
                      "QFI[%d] dir[%d] periodicity[%llu us]",
                      qos_flow->qfi, sess->tsc->direction,
                      (unsigned long long)sess->tsc->periodicity_us);
-        } else if (sess->tsc && sess->tsc->status != TSC_STATUS_ABSENT &&
+        } else if (sess->tsc && sess->tsc->status != SMF_TSC_STATUS_ABSENT &&
                 qos_flow->qfi == sess->tsc->qfi) {
             /* TSC was requested for this flow but is not ACTIVE (PARTIAL or
              * DOWNGRADED) — omit the IE and run on the 5QI. The reason is
@@ -670,6 +680,11 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_modify_request_transfer(
 
     QosFlowAddOrModifyRequestList =
         &ie->value.choice.QosFlowAddOrModifyRequestList;
+
+    if (sess->tsc)
+        sess->tsc->n2_tsc_encoded = false;
+
+    smf_tsc_bind_qfi(sess);
 
     /* Home-Routed V-SMF: QoS flow */
     if (HOME_ROUTED_ROAMING_IN_VSMF(sess)) {
@@ -759,8 +774,21 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_modify_request_transfer(
                                 qosFlowLevelQosParameters, &qos, true);
 
                     /* TSC Traffic Characteristics on the Modify path (home-routed). */
-                    if (sess->tsc && sess->tsc->status == TSC_STATUS_ACTIVE &&
-                            qosFlowAddModRequestItem->qfi == sess->tsc->qfi) {
+                    smf_tsc_bind_qfi(sess);
+                    smf_ngap_log_tsc_qfi_skip(sess,
+                            (uint8_t)qosFlowAddModRequestItem->qfi);
+                    if (sess->tsc && sess->tsc->status == SMF_TSC_STATUS_ACTIVE &&
+                            (qosFlowAddModRequestItem->qfi == sess->tsc->qfi ||
+                            (sess->tsc->qfi == 0 &&
+                             qos.index == SMF_TSC_GBR_5QI))) {
+                        if (sess->tsc->qfi == 0) {
+                            sess->tsc->qfi =
+                                (uint8_t)qosFlowAddModRequestItem->qfi;
+                            ogs_info("[SMF] CP6_DBG tsc_qfi_bind: PSI[%d] "
+                                     "pcc_rule_id[%s] qfi[%d]",
+                                     sess->psi, sess->tsc->pcc_rule_id,
+                                     sess->tsc->qfi);
+                        }
                         NGAP_ProtocolExtensionContainer_11905P269_t *tscExtContainer = NULL;
                         NGAP_QosFlowAddOrModifyRequestItem_ExtIEs_t *tscExtIe = NULL;
                         NGAP_TSCTrafficCharacteristics_t *TSCTrafficCharacteristics = NULL;
@@ -784,12 +812,12 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_modify_request_transfer(
                         TSCTrafficCharacteristics =
                             &tscExtIe->extensionValue.choice.TSCTrafficCharacteristics;
 
-                        if (sess->tsc->direction == TSC_DL ||
-                                sess->tsc->direction == TSC_BOTH)
+                        if (sess->tsc->direction == SMF_TSC_DIR_DL ||
+                                sess->tsc->direction == SMF_TSC_DIR_BOTH)
                             TSCTrafficCharacteristics->tSCAssistanceInformationDL =
                                 smf_ngap_build_tsc_assistance(sess->tsc);
-                        if (sess->tsc->direction == TSC_UL ||
-                                sess->tsc->direction == TSC_BOTH)
+                        if (sess->tsc->direction == SMF_TSC_DIR_UL ||
+                                sess->tsc->direction == SMF_TSC_DIR_BOTH)
                             TSCTrafficCharacteristics->tSCAssistanceInformationUL =
                                 smf_ngap_build_tsc_assistance(sess->tsc);
 
@@ -797,7 +825,8 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_modify_request_transfer(
                                  "QFI[%d] dir[%d] periodicity[%llu us]",
                                  qosFlowAddModRequestItem->qfi, sess->tsc->direction,
                                  (unsigned long long)sess->tsc->periodicity_us);
-                    } else if (sess->tsc && sess->tsc->status != TSC_STATUS_ABSENT &&
+                        sess->tsc->n2_tsc_encoded = true;
+                    } else if (sess->tsc && sess->tsc->status != SMF_TSC_STATUS_ABSENT &&
                             qosFlowAddModRequestItem->qfi == sess->tsc->qfi) {
                         ogs_warn("[SMF] NGAP TSC IE omitted (modify): QFI[%d] status[%d] "
                                  "reason[%s] -- flow proceeds on baseline 5QI",
@@ -829,8 +858,9 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_modify_request_transfer(
                     &qos_flow->qos, include_gbr);
 
             /* TSC Traffic Characteristics on the Modify path. */
-            if (sess->tsc && sess->tsc->status == TSC_STATUS_ACTIVE &&
-                    qos_flow->qfi == sess->tsc->qfi) {
+            smf_tsc_bind_qfi(sess);
+            smf_ngap_log_tsc_qfi_skip(sess, qos_flow->qfi);
+            if (smf_tsc_ngap_encode_on_qos_flow(sess, qos_flow)) {
                 NGAP_ProtocolExtensionContainer_11905P269_t *tscExtContainer = NULL;
                 NGAP_QosFlowAddOrModifyRequestItem_ExtIEs_t *tscExtIe = NULL;
                 NGAP_TSCTrafficCharacteristics_t *TSCTrafficCharacteristics = NULL;
@@ -854,12 +884,12 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_modify_request_transfer(
                 TSCTrafficCharacteristics =
                     &tscExtIe->extensionValue.choice.TSCTrafficCharacteristics;
 
-                if (sess->tsc->direction == TSC_DL ||
-                        sess->tsc->direction == TSC_BOTH)
+                if (sess->tsc->direction == SMF_TSC_DIR_DL ||
+                        sess->tsc->direction == SMF_TSC_DIR_BOTH)
                     TSCTrafficCharacteristics->tSCAssistanceInformationDL =
                         smf_ngap_build_tsc_assistance(sess->tsc);
-                if (sess->tsc->direction == TSC_UL ||
-                        sess->tsc->direction == TSC_BOTH)
+                if (sess->tsc->direction == SMF_TSC_DIR_UL ||
+                        sess->tsc->direction == SMF_TSC_DIR_BOTH)
                     TSCTrafficCharacteristics->tSCAssistanceInformationUL =
                         smf_ngap_build_tsc_assistance(sess->tsc);
 
@@ -867,7 +897,8 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_modify_request_transfer(
                          "QFI[%d] dir[%d] periodicity[%llu us]",
                          qos_flow->qfi, sess->tsc->direction,
                          (unsigned long long)sess->tsc->periodicity_us);
-            } else if (sess->tsc && sess->tsc->status != TSC_STATUS_ABSENT &&
+                sess->tsc->n2_tsc_encoded = true;
+            } else if (sess->tsc && sess->tsc->status != SMF_TSC_STATUS_ABSENT &&
                     qos_flow->qfi == sess->tsc->qfi) {
                 ogs_warn("[SMF] NGAP TSC IE omitted (modify): QFI[%d] status[%d] "
                          "reason[%s] -- flow proceeds on baseline 5QI",

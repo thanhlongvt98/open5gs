@@ -37,7 +37,7 @@ extern int __pcf_log_domain;
 #undef OGS_LOG_DOMAIN
 #define OGS_LOG_DOMAIN __pcf_log_domain
 
-#define OGS_PCF_MAX_NUM_OF_QOS_PROFILE  64
+#define PCF_MAX_NUM_OF_QOS_PROFILE  64
 
 typedef struct pcf_qos_profile_s {
     char    *reference;
@@ -56,8 +56,10 @@ typedef struct pcf_context_s {
     ogs_hash_t      *ipv6prefix_hash;
     ogs_hash_t      *mac_addr_hash; /* MAC-keyed PCF bindings (Ethernet sessions) */
 
-    pcf_qos_profile_t  qos_profile[OGS_PCF_MAX_NUM_OF_QOS_PROFILE];
+    pcf_qos_profile_t  qos_profile[PCF_MAX_NUM_OF_QOS_PROFILE];
     int                num_of_qos_profile;
+
+    char            *tsn_af_bridge_uri;
 } pcf_context_t;
 
 struct pcf_ue_am_s {

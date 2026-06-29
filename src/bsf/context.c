@@ -352,21 +352,6 @@ bsf_sess_t *bsf_sess_find_by_ipv4addr(
     return ogs_hash_get(self.ipv4addr_hash, &ipv4addr, sizeof(ipv4addr));
 }
 
-/* MAC-keyed PCF binding (PcfBinding.macAddr48) for Ethernet sessions. */
-static bool bsf_mac_from_string(uint8_t *mac, const char *s)
-{
-    unsigned int b[6];
-    int i;
-    if (!s)
-        return false;
-    if (sscanf(s, "%x:%x:%x:%x:%x:%x",
-            &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) != 6)
-        return false;
-    for (i = 0; i < 6; i++)
-        mac[i] = (uint8_t)b[i];
-    return true;
-}
-
 bool bsf_sess_set_mac_addr(bsf_sess_t *sess, char *mac_addr48_string)
 {
     ogs_assert(sess);
@@ -377,8 +362,8 @@ bool bsf_sess_set_mac_addr(bsf_sess_t *sess, char *mac_addr48_string)
                 sess->mac_addr, 6, NULL);
         ogs_free(sess->mac_addr48_string);
     }
-    if (bsf_mac_from_string(sess->mac_addr, mac_addr48_string) == false) {
-        ogs_error("bsf_mac_from_string[%s] failed", mac_addr48_string);
+    if (ogs_mac_from_string(sess->mac_addr, mac_addr48_string) == false) {
+        ogs_error("ogs_mac_from_string[%s] failed", mac_addr48_string);
         return false;
     }
     sess->mac_addr48_string = ogs_strdup(mac_addr48_string);
@@ -429,8 +414,8 @@ bsf_sess_t *bsf_sess_find_by_mac_addr(char *mac_addr48_string)
 
     ogs_assert(mac_addr48_string);
 
-    if (bsf_mac_from_string(mac, mac_addr48_string) == false) {
-        ogs_error("bsf_mac_from_string() failed");
+    if (ogs_mac_from_string(mac, mac_addr48_string) == false) {
+        ogs_error("ogs_mac_from_string() failed");
         return NULL;
     }
     return ogs_hash_get(self.mac_addr_hash, mac, 6);

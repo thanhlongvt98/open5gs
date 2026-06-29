@@ -528,6 +528,27 @@ int smf_gtp2_send_update_bearer_request(smf_bearer_t *bearer)
     return rv;
 }
 
+/* Bind the per-session TSC context to the QFI of the PCC rule that carries
+ * TSCAI (TS 23.501 §5.27.2), not the first QoS flow touched in the loop. */
+static void smf_tsc_bind_qfi_if_matching(
+        smf_sess_t *sess, const ogs_pcc_rule_t *pcc_rule,
+        smf_bearer_t *qos_flow)
+{
+    ogs_assert(sess);
+    ogs_assert(pcc_rule);
+    ogs_assert(qos_flow);
+
+    if (!sess->tsc || sess->tsc->pcc_rule_id[0] == '\0')
+        return;
+    if (!pcc_rule->id ||
+            strcmp(pcc_rule->id, sess->tsc->pcc_rule_id) != 0)
+        return;
+
+    sess->tsc->qfi = qos_flow->qfi;
+    ogs_info("[SMF] CP6_DBG tsc_qfi_bind: PSI[%d] pcc_rule_id[%s] qfi[%d]",
+             sess->psi, sess->tsc->pcc_rule_id, qos_flow->qfi);
+}
+
 void smf_qos_flow_binding(smf_sess_t *sess)
 {
     int rv;
@@ -622,18 +643,13 @@ void smf_qos_flow_binding(smf_sess_t *sess)
 
                 memcpy(&qos_flow->qos, &pcc_rule->qos, sizeof(ogs_qos_t));
 
-                /* Bind the SMF-local TSC context to the TSC flow's QFI. One TSC
-                 * context per session, so the first QoS flow created for a
-                 * TSC-assisted session carries the binding; multi-flow-per-session
-                 * TSC is out of scope. */
-                if (sess->tsc && sess->tsc->qfi == 0)
-                    sess->tsc->qfi = qos_flow->qfi;
+                smf_tsc_bind_qfi_if_matching(sess, pcc_rule, qos_flow);
 
                 /* A TSC-assisted flow that is not ACTIVE runs on its baseline 5QI
                  * (the NGAP TSC IE is omitted) — record it so the fallback
                  * success path is visible at the binding stage. */
                 if (sess->tsc && sess->tsc->qfi == qos_flow->qfi &&
-                        sess->tsc->status != TSC_STATUS_ACTIVE)
+                        sess->tsc->status != SMF_TSC_STATUS_ACTIVE)
                     ogs_info("[SMF] QoS flow QFI[%d] on baseline 5QI "
                              "(TSC status[%d])",
                              qos_flow->qfi, sess->tsc->status);
@@ -642,6 +658,8 @@ void smf_qos_flow_binding(smf_sess_t *sess)
 
             } else {
                 ogs_assert(strcmp(qos_flow->pcc_rule.id, pcc_rule->id) == 0);
+
+                smf_tsc_bind_qfi_if_matching(sess, pcc_rule, qos_flow);
 
                 /*
                  * Check if any MBR/GBR value is non-zero. This indicates that
@@ -844,6 +862,9 @@ void smf_qos_flow_binding(smf_sess_t *sess)
             ogs_assert_if_reached();
         }
     }
+
+    /* Fallback: bind TSC QFI when the PCC-rule loop did not (TS 23.501 §5.27.2). */
+    smf_tsc_bind_qfi(sess);
 
     check = pfcp_flags & (OGS_PFCP_MODIFY_CREATE|OGS_PFCP_MODIFY_REMOVE);
     if (check != 0 &&

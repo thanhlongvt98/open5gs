@@ -87,6 +87,9 @@ void pcf_context_final(void)
     ogs_assert(self.mac_addr_hash);
     ogs_hash_destroy(self.mac_addr_hash);
 
+    ogs_free(self.tsn_af_bridge_uri);
+    self.tsn_af_bridge_uri = NULL;
+
     ogs_pool_final(&pcf_app_pool);
     ogs_pool_final(&pcf_sess_pool);
     ogs_pool_final(&pcf_ue_am_pool);
@@ -371,9 +374,9 @@ static int parse_qos_profiles_conf(ogs_yaml_iter_t *parent)
             goto next;
         }
 
-        if (self.num_of_qos_profile >= OGS_PCF_MAX_NUM_OF_QOS_PROFILE) {
+        if (self.num_of_qos_profile >= PCF_MAX_NUM_OF_QOS_PROFILE) {
             ogs_warn("Ignore qos_profiles[%s] beyond max [%d]",
-                    reference, OGS_PCF_MAX_NUM_OF_QOS_PROFILE);
+                    reference, PCF_MAX_NUM_OF_QOS_PROFILE);
             goto next;
         }
 
@@ -441,6 +444,8 @@ int pcf_context_parse_config(void)
                         ogs_error("parse_policy_conf() failed");
                         return rv;
                     }
+                } else if (!strcmp(pcf_key, "tsn_af_bridge_uri")) {
+                    self.tsn_af_bridge_uri = ogs_strdup(ogs_yaml_iter_value(&pcf_iter));
                 } else
                     ogs_warn("unknown key `%s`", pcf_key);
             }
@@ -741,21 +746,6 @@ static void clear_ipv6prefix(pcf_sess_t *sess)
     }
 }
 
-/* MAC-keyed binding for Ethernet PDU sessions (no UE IP). */
-static bool pcf_mac_from_string(uint8_t *mac, const char *s)
-{
-    unsigned int b[6];
-    int i;
-    if (!s)
-        return false;
-    if (sscanf(s, "%x:%x:%x:%x:%x:%x",
-            &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) != 6)
-        return false;
-    for (i = 0; i < 6; i++)
-        mac[i] = (uint8_t)b[i];
-    return true;
-}
-
 static void clear_mac_addr(pcf_sess_t *sess)
 {
     ogs_assert(sess);
@@ -774,8 +764,8 @@ bool pcf_sess_set_mac_addr(pcf_sess_t *sess, char *mac_addr48_string)
 
     clear_mac_addr(sess);
 
-    if (pcf_mac_from_string(sess->mac_addr, mac_addr48_string) == false) {
-        ogs_error("pcf_mac_from_string[%s] failed", mac_addr48_string);
+    if (ogs_mac_from_string(sess->mac_addr, mac_addr48_string) == false) {
+        ogs_error("ogs_mac_from_string[%s] failed", mac_addr48_string);
         return false;
     }
     sess->mac_addr48_string = ogs_strdup(mac_addr48_string);
@@ -792,8 +782,8 @@ pcf_sess_t *pcf_sess_find_by_mac_addr(char *mac_addr48_string)
     uint8_t mac[6];
     ogs_assert(mac_addr48_string);
 
-    if (pcf_mac_from_string(mac, mac_addr48_string) == false) {
-        ogs_error("pcf_mac_from_string() failed");
+    if (ogs_mac_from_string(mac, mac_addr48_string) == false) {
+        ogs_error("ogs_mac_from_string() failed");
         return NULL;
     }
     return ogs_hash_get(self.mac_addr_hash, mac, 6);

@@ -511,6 +511,9 @@ ogs_pfcp_rule_t *ogs_pfcp_rule_find_by_sdf_filter_id(
         ogs_pfcp_sess_t *sess, uint32_t sdf_filter_id);
 void ogs_pfcp_rule_remove(ogs_pfcp_rule_t *rule);
 void ogs_pfcp_rule_remove_all(ogs_pfcp_pdr_t *pdr);
+int ogs_pfcp_parse_eth_packet_filter(
+        ogs_pfcp_rule_t *rule,
+        const ogs_pfcp_tlv_ethernet_packet_filter_t *tlv);
 
 int ogs_pfcp_ue_pool_generate(void);
 ogs_pfcp_ue_ip_t *ogs_pfcp_ue_ip_alloc(

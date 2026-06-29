@@ -1397,3 +1397,17 @@ int ogs_pcc_rule_update_qos_from_media(
 
     return OGS_OK;
 }
+
+bool ogs_mac_from_string(uint8_t *mac, const char *s)
+{
+    unsigned int b[6];
+    int i;
+    if (!s)
+        return false;
+    if (sscanf(s, "%x:%x:%x:%x:%x:%x",
+            &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) != 6)
+        return false;
+    for (i = 0; i < 6; i++)
+        mac[i] = (uint8_t)b[i];
+    return true;
+}

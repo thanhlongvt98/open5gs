@@ -1166,6 +1166,8 @@ typedef struct ogs_port_s {
     uint16_t port;
 } ogs_port_t;
 
+bool ogs_mac_from_string(uint8_t *mac, const char *s);
+
 #ifdef __cplusplus
 }
 #endif

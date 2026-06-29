@@ -22,6 +22,7 @@
 #include "nas-path.h"
 #include "gsm-build.h"
 #include "namf-build.h"
+#include "ngap-build.h"
 #include "local-path.h"
 #include "binding.h"
 
@@ -36,7 +37,7 @@ static void smf_tsc_ingest_pcc_rule(
         smf_sess_t *sess, OpenAPI_pcc_rule_t *PccRule)
 {
     OpenAPI_tscai_input_container_t *dl = NULL, *ul = NULL, *t = NULL;
-    tsc_context_t *tsc = NULL;
+    smf_tsc_context_t *tsc = NULL;
 
     ogs_assert(sess);
     ogs_assert(PccRule);
@@ -52,6 +53,10 @@ static void smf_tsc_ingest_pcc_rule(
     tsc = smf_sess_tsc_add(sess);
     if (!tsc)
         return;
+
+    if (PccRule->pcc_rule_id)
+        ogs_cpystrn(tsc->pcc_rule_id, PccRule->pcc_rule_id,
+                sizeof(tsc->pcc_rule_id));
 
     /* Timing is read from whichever container is present (prefer DL). */
     t = dl ? dl : ul;
@@ -81,24 +86,27 @@ static void smf_tsc_ingest_pcc_rule(
     }
 
     if (dl && ul)
-        tsc->direction = TSC_BOTH;
+        tsc->direction = SMF_TSC_DIR_BOTH;
     else if (dl)
-        tsc->direction = TSC_DL;
+        tsc->direction = SMF_TSC_DIR_DL;
     else
-        tsc->direction = TSC_UL;
+        tsc->direction = SMF_TSC_DIR_UL;
 
     /* classify on the MANDATORY field. Periodicity is mandatory
      * (TS 38.413 §9.3.1.131); Burst Arrival Time is optional (absent until the
      * G-clock conversion), so its absence is NOT a downgrade. A flow
      * that is not ACTIVE omits the NGAP IE and runs on its 5QI. */
     if (!t->is_periodicity)
-        smf_sess_tsc_set_status(tsc, TSC_STATUS_PARTIAL,
-                TSC_REASON_NO_PERIODICITY);
+        smf_sess_tsc_set_status(tsc, SMF_TSC_STATUS_PARTIAL,
+                SMF_TSC_REASON_NO_PERIODICITY);
     else if (tsc->periodicity_us > 640000)
-        smf_sess_tsc_set_status(tsc, TSC_STATUS_DOWNGRADED,
-                TSC_REASON_PERIODICITY_RANGE);
+        smf_sess_tsc_set_status(tsc, SMF_TSC_STATUS_DOWNGRADED,
+                SMF_TSC_REASON_PERIODICITY_RANGE);
     else
-        smf_sess_tsc_set_status(tsc, TSC_STATUS_ACTIVE, NULL);
+        smf_sess_tsc_set_status(tsc, SMF_TSC_STATUS_ACTIVE, NULL);
+
+    if (tsc->status == SMF_TSC_STATUS_ACTIVE)
+        smf_tsc_bind_qfi(sess);
 
     ogs_info("[SMF] TSC ingest: PSI[%d] dir[%d] periodicity[%llu us] "
              "survival[%u us] status[%d]",
@@ -616,6 +624,19 @@ bool smf_npcf_smpolicycontrol_handle_create(
 
     ogs_sbi_header_free(&header);
 
+    /* If the PFCP Session Establishment Response arrived before the PCF
+     * policy association was established, the TSN_BRIDGE_INFO update was
+     * deferred (TS 29.512 R19 §4.2.4.23).  Send it now that resource_uri
+     * is set. */
+    if (sess->tsc_bridge.notify_pending && sess->tsc_bridge.bridge) {
+        int r = smf_sbi_discover_and_send(
+                OGS_SBI_SERVICE_TYPE_NPCF_SMPOLICYCONTROL, NULL,
+                smf_npcf_smpolicycontrol_build_update_tsn_bridge,
+                sess, NULL, 0, NULL);
+        ogs_expect(r == OGS_OK);
+        sess->tsc_bridge.notify_pending = false;
+    }
+
     /* SBI Features */
     if (SmPolicyDecision->supp_feat) {
         uint64_t supported_features =
@@ -1006,7 +1027,21 @@ bool smf_npcf_smpolicycontrol_handle_update_notify(
 
     ogs_assert(true == ogs_sbi_send_http_status_no_content(stream));
 
+    /* Bind TSC QFI before QoS flow binding so PFCP/NGAP paths see the GBR flow. */
+    smf_tsc_bind_qfi(sess);
+
     smf_qos_flow_binding(sess);
+
+    /* TS 23.502 §4.3.3.2: TSC became ACTIVE after the GBR QoS flow was already
+     * installed and no PFCP QoS modify is in flight — push a network-requested
+     * N1N2 modify so N2 carries TSC Traffic Characteristics on the bound QFI. */
+    bool tsc_follow_up_n1n2_sent = false;
+    if (sess->tsc && sess->tsc->status == SMF_TSC_STATUS_ACTIVE &&
+            !sess->tsc->n2_tsc_encoded &&
+            ogs_list_count(&sess->qos_flow_to_modify_list) == 0 &&
+            !sess->pending_modification_xact) {
+        tsc_follow_up_n1n2_sent = smf_tsc_send_n2_follow_up_if_needed(sess);
+    }
 
     /* Deliver the NW-TT PMIC to the UPF over N4 (TS 29.244). The policy update carries
      * the CNC's 802.1Qbv gate (PMIC) post-establishment; smf_qos_flow_binding refreshes
@@ -1020,7 +1055,8 @@ bool smf_npcf_smpolicycontrol_handle_update_notify(
      * transaction (see comment below + [[project_smf_tscai_listwipe_crash_fix]]);
      * the PMIC then rides the binding's modify path instead. */
     if (sess->tsc_bridge.nwtt_pmic &&
-            ogs_list_count(&sess->qos_flow_to_modify_list) == 0)
+            ogs_list_count(&sess->qos_flow_to_modify_list) == 0 &&
+            !tsc_follow_up_n1n2_sent)
         smf_5gc_pfcp_send_all_pdr_modification_request(
                 sess, NULL, OGS_PFCP_MODIFY_TSC, 0, 0);
 
@@ -1043,7 +1079,7 @@ bool smf_npcf_smpolicycontrol_handle_update_notify(
      * So only the PMIC-only case (no QoS-flow change, list empty) needs a standalone N1: a
      * pure N1 PDU Session Modification Command (codes (0,0)) that appends the DS-TT PMIC. */
     if (ogs_list_count(&sess->qos_flow_to_modify_list) == 0 &&
-            sess->tsc_bridge.dstt_pmic) {
+            sess->tsc_bridge.dstt_pmic && !tsc_follow_up_n1n2_sent) {
         smf_n1_n2_message_transfer_param_t param;
         sess->pti = OGS_NAS_PROCEDURE_TRANSACTION_IDENTITY_UNASSIGNED;
         memset(&param, 0, sizeof(param));

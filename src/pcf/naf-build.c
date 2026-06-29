@@ -19,6 +19,9 @@
 
 #include "naf-build.h"
 
+#include "sbi/openapi/model/pdu_session_tsn_bridge.h"
+#include "sbi/openapi/model/tsn_bridge_info.h"
+
 ogs_sbi_request_t *pcf_naf_callback_build_policyauthorization_terminate(
         pcf_app_t *app_session, void *data)
 {
@@ -56,9 +59,9 @@ end:
  *
  * Body = PduSessionTsnBridge (TS 29.514 §5.6.2.40): the mandatory
  * tsnBridgeInfo (bridgeId, dsttPortNum, dsttAddr = the DS-TT *port* MAC from
- * N1, dsttResidTime = UE-DS-TT residence time in ns). We hand-serialize the
- * JSON (same wire result as OpenAPI_pdu_session_tsn_bridge_convertToJSON,
- * without the model ownership dance). NW-TT info is the AF's concern (it has
+ * N1, dsttResidTime = UE-DS-TT residence time in ns). Built via
+ * OpenAPI_pdu_session_tsn_bridge_convertToJSON so the wire format stays
+ * aligned with the generated model. NW-TT info is the AF's concern (it has
  * no DS-TT-side N1 source) and is injected there from env.
  */
 ogs_sbi_request_t *pcf_naf_build_tsn_bridge_new_bridge(
@@ -68,8 +71,11 @@ ogs_sbi_request_t *pcf_naf_build_tsn_bridge_new_bridge(
 {
     ogs_sbi_message_t message;
     ogs_sbi_request_t *request = NULL;
-    char *body = NULL;
-    char resid_field[48];
+    OpenAPI_tsn_bridge_info_t *bridge_info = NULL;
+    OpenAPI_pdu_session_tsn_bridge_t *bridge = NULL;
+    cJSON *json = NULL;
+    char *json_str = NULL;
+    char *content = NULL;
 
     ogs_assert(af_uri);
 
@@ -84,23 +90,47 @@ ogs_sbi_request_t *pcf_naf_build_tsn_bridge_new_bridge(
     request = ogs_sbi_build_request(&message);
     ogs_assert(request);
 
-    if (has_resid_time)
-        ogs_snprintf(resid_field, sizeof(resid_field),
-                ",\"dsttResidTime\":%d", resid_time_ns);
-    else
-        resid_field[0] = '\0';
+    bridge_info = OpenAPI_tsn_bridge_info_create(
+            true, bridge_id,
+            ds_tt_mac ? ogs_strdup(ds_tt_mac) : NULL,
+            true, ds_tt_port,
+            has_resid_time, resid_time_ns);
+    if (!bridge_info) {
+        ogs_error("OpenAPI_tsn_bridge_info_create() failed");
+        goto end;
+    }
 
-    body = ogs_msprintf(
-            "{\"tsnBridgeInfo\":{"
-            "\"bridgeId\":%d,\"dsttPortNum\":%d,"
-            "\"dsttAddr\":\"%s\"%s}}",
-            bridge_id, ds_tt_port,
-            ds_tt_mac ? ds_tt_mac : "",
-            resid_field);
-    ogs_assert(body);
+    bridge = OpenAPI_pdu_session_tsn_bridge_create(
+            bridge_info, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+    if (!bridge) {
+        ogs_error("OpenAPI_pdu_session_tsn_bridge_create() failed");
+        OpenAPI_tsn_bridge_info_free(bridge_info);
+        goto end;
+    }
 
-    request->http.content = body;          /* freed by ogs_sbi_request_free() */
-    request->http.content_length = strlen(body);
+    json = OpenAPI_pdu_session_tsn_bridge_convertToJSON(bridge);
+    OpenAPI_pdu_session_tsn_bridge_free(bridge);
+    if (!json) {
+        ogs_error("OpenAPI_pdu_session_tsn_bridge_convertToJSON() failed");
+        goto end;
+    }
+
+    json_str = cJSON_PrintUnformatted(json);
+    cJSON_Delete(json);
+    if (!json_str) {
+        ogs_error("cJSON_PrintUnformatted() failed");
+        goto end;
+    }
+
+    content = ogs_strdup(json_str);
+    cJSON_free(json_str);
+    if (!content) {
+        ogs_error("ogs_strdup() failed");
+        goto end;
+    }
+
+    request->http.content = content;
+    request->http.content_length = strlen(content);
     ogs_sbi_header_set(request->http.headers,
             OGS_SBI_CONTENT_TYPE, OGS_SBI_CONTENT_JSON_TYPE);
 
