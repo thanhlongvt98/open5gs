@@ -707,6 +707,12 @@ typedef struct smf_sess_s {
          * field holds the decoded integer nanoseconds (correctionField >> 16). */
         uint64_t    ds_tt_resid_time_ns;
         bool        has_ds_tt_resid_time;
+        /* Set when the DS-TT port was assigned by the UPF but the PCF
+         * Npcf_SMPolicyControl_Create association was not yet established
+         * at that moment (TS 29.512 R19 §4.2.4.23 TSN_BRIDGE_INFO trigger).
+         * Cleared and the deferred update is sent in
+         * smf_npcf_smpolicycontrol_handle_create once resource_uri is set. */
+        bool        notify_pending;
     } tsc_bridge;
 
     ogs_pool_id_t smf_ue_id;

@@ -196,15 +196,22 @@ uint8_t smf_5gc_n4_handle_session_establishment_response(
         ogs_info("[SMF] 5GS-TSN bridge: DS-TT port[%u] (PSI[%d])",
                 sess->tsc_bridge.ds_tt_port, sess->psi);
 
-        /* report the 5GS TSN bridge to the PCF (which relays
-         * it to the TSN AF) via Npcf_SMPolicyControl_Update (TS 29.512). The
-         * trigger (TSN_BRIDGE_INFO) is met now that the DS-TT port is known. */
+        /* Report the 5GS TSN bridge to the PCF (which relays it to the TSN
+         * AF) via Npcf_SMPolicyControl_Update (TS 29.512 R19 §4.2.4.23,
+         * TSN_BRIDGE_INFO trigger).  In normal session setup the PCF policy
+         * association is established before the PFCP response arrives, but
+         * defer if the association is not yet ready to avoid a silent drop. */
         if (sess->policy_association.resource_uri) {
             int r = smf_sbi_discover_and_send(
                     OGS_SBI_SERVICE_TYPE_NPCF_SMPOLICYCONTROL, NULL,
                     smf_npcf_smpolicycontrol_build_update_tsn_bridge,
                     sess, NULL, 0, NULL);
             ogs_expect(r == OGS_OK);
+        } else {
+            ogs_warn("[SMF] PCF policy association not ready at DS-TT port "
+                    "assignment (PSI[%d]); deferring TSN_BRIDGE_INFO notify",
+                    sess->psi);
+            sess->tsc_bridge.notify_pending = true;
         }
     }
 

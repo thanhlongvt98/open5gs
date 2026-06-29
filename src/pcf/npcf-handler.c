@@ -49,8 +49,16 @@ static uint8_t pcf_qos_index_from_media(
     case OpenAPI_media_type_CONTROL:
         return OGS_QOS_INDEX_5;
     case OpenAPI_media_type_DATA:
-        /* TSN/Ethernet flows use medType DATA (TS 29.514 §5.6.2.7). */
-        return OGS_QOS_INDEX_1;
+        /* Per TS 29.514 R17 §5.6.2.35 and §4.2.2.24: TSN data flows shall
+         * supply a qosReference that maps to a pre-provisioned DC-GBR QoS
+         * profile in the PCF configuration.  Without qosReference there is
+         * no safe default: falling back to OGS_QOS_INDEX_1 would silently
+         * steer TSN traffic onto the default bearer.  Reject so the operator
+         * or AF can correct the configuration (TS 29.514 R17 §5.6.2.35). */
+        *err_out = "medType=DATA requires qosReference for TSN flows; "
+                   "add a matching qos_profiles entry in PCF configuration "
+                   "(TS 29.514 R17 §5.6.2.35)";
+        return 0;
     case OpenAPI_media_type_NULL:
         *err_out = "Media-Type is Required";
         return 0;

@@ -624,6 +624,19 @@ bool smf_npcf_smpolicycontrol_handle_create(
 
     ogs_sbi_header_free(&header);
 
+    /* If the PFCP Session Establishment Response arrived before the PCF
+     * policy association was established, the TSN_BRIDGE_INFO update was
+     * deferred (TS 29.512 R19 §4.2.4.23).  Send it now that resource_uri
+     * is set. */
+    if (sess->tsc_bridge.notify_pending && sess->tsc_bridge.bridge) {
+        int r = smf_sbi_discover_and_send(
+                OGS_SBI_SERVICE_TYPE_NPCF_SMPOLICYCONTROL, NULL,
+                smf_npcf_smpolicycontrol_build_update_tsn_bridge,
+                sess, NULL, 0, NULL);
+        ogs_expect(r == OGS_OK);
+        sess->tsc_bridge.notify_pending = false;
+    }
+
     /* SBI Features */
     if (SmPolicyDecision->supp_feat) {
         uint64_t supported_features =
