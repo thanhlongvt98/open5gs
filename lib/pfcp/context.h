@@ -191,6 +191,11 @@ typedef struct ogs_pfcp_pdr_s {
 
     uint8_t                 qfi;
 
+    /* Ethernet PDU Session Information (TS 29.244 §8.2.117): ETHI flag set on
+     * the PDI so the UPF treats matched traffic as Ethernet PDU-session frames.
+     * Set on the DL PDR for an Ethernet PDU session. */
+    bool                    ethernet_pdu_session_information;
+
     ogs_pfcp_far_t          *far;
 
     int                     num_of_urr;
@@ -400,6 +405,14 @@ ED6(uint8_t     spare1:3;,
     ogs_ipfw_rule_t ipfw;
     uint32_t sdf_filter_id;
 
+    /* TSN Ethernet packet filter (TS 24.501 §9.11.4.13): when the SDF
+     * Flow-Description is the "eth|..." sentinel, the rule carries an L2
+     * filter (dst/src MAC, C-TAG VID/PCP, EtherType) instead of an IPFW IP
+     * rule. The UPF matches DL frames against this to steer the TSN stream
+     * onto its dedicated QoS flow (DRB/QFI). */
+    bool is_eth;
+    ogs_pf_content_t eth_content;
+
     /* Related Context */
     ogs_pfcp_pdr_t  *pdr;
 } ogs_pfcp_rule_t;
@@ -498,6 +511,9 @@ ogs_pfcp_rule_t *ogs_pfcp_rule_find_by_sdf_filter_id(
         ogs_pfcp_sess_t *sess, uint32_t sdf_filter_id);
 void ogs_pfcp_rule_remove(ogs_pfcp_rule_t *rule);
 void ogs_pfcp_rule_remove_all(ogs_pfcp_pdr_t *pdr);
+int ogs_pfcp_parse_eth_packet_filter(
+        ogs_pfcp_rule_t *rule,
+        const ogs_pfcp_tlv_ethernet_packet_filter_t *tlv);
 
 int ogs_pfcp_ue_pool_generate(void);
 ogs_pfcp_ue_ip_t *ogs_pfcp_ue_ip_alloc(

@@ -2606,6 +2606,7 @@ ogs_tlv_desc_t ogs_pfcp_tlv_desc_pdi =
         &ogs_pfcp_tlv_desc_application_id,
         &ogs_pfcp_tlv_desc_ethernet_pdu_session_information,
         &ogs_pfcp_tlv_desc_ethernet_packet_filter,
+        &ogs_tlv_desc_more8,
         &ogs_pfcp_tlv_desc_qfi,
         &ogs_pfcp_tlv_desc_framed_route,
         &ogs_tlv_desc_more8,

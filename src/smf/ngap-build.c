@@ -19,6 +19,246 @@
 
 #include "ngap-build.h"
 
+/* CN Packet Delay Budget (TS 23.501 §5.7.3.4) in 0.01 ms units, signalled on a
+ * NonDynamic5QIDescriptor (TS 38.413 §9.3.1.28, ext IEs 187/188) so the NG-RAN
+ * scheduler can compute the radio deadline 5G-AN PDB = PDB - CN PDB. The CN PDB is
+ * a per-5QI value: it must fit inside that 5QI's PDB (TS 23.501 Table 5.7.4-1), so a
+ * single global constant would over-subtract for tight delay-critical 5QIs (e.g. 5QI
+ * 85, 5 ms PDB) and under-subtract for relaxed ones. Only delay-critical GBR 5QIs
+ * (82-86) carry a CN PDB; a 5QI with no table entry signals none (TS 23.501 §5.7.3.4
+ * — CN PDB is a delay-critical-GBR concept). Values are a topology constant
+ * (PSA-UPF <-> NG-RAN); lab knob, tune per 5QI as experiments demand. */
+typedef struct smf_cn_pdb_s {
+    uint8_t  five_qi;        /* standardized 5QI index */
+    uint16_t cn_pdb_dl_001ms;/* DL CN PDB, 0.01 ms units (0 = omit direction) */
+    uint16_t cn_pdb_ul_001ms;/* UL CN PDB, 0.01 ms units (0 = omit direction) */
+} smf_cn_pdb_t;
+
+static const smf_cn_pdb_t smf_cn_pdb_table[] = {
+    /* CN PDB per TS 23.501 R17 Table 5.7.4-1 NOTEs 4/5/6 (static UPF<->5G-AN delay),
+     * applied symmetrically to DL and UL (the spec gives one one-way value). */
+    { 82, 100, 100 },  /* NOTE 4: 1.00 ms */
+    { 83, 100, 100 },  /* NOTE 4: 1.00 ms */
+    { 84, 500, 500 },  /* NOTE 6: 5.00 ms */
+    { 85, 200, 200 },  /* NOTE 5: 2.00 ms */
+    { 86, 200, 200 },  /* NOTE 5: 2.00 ms */
+    /* 5QIs 87-90 are R18 additions (not in R17 Table 5.7.4-1).
+     * CN PDB values below are extrapolated and UNVERIFIED against
+     * R18 — verify against TS 23.501 R18 Table 5.7.4-1 before relying on them. */
+    { 87, 100, 100 },  /* NOTE 4: 1.00 ms */
+    { 88, 100, 100 },  /* NOTE 4: 1.00 ms */
+    { 89, 100, 100 },  /* NOTE 4: 1.00 ms */
+    { 90, 100, 100 },  /* NOTE 4: 1.00 ms */
+};
+
+/* Return the per-5QI CN PDB entry for a standardized 5QI, or NULL when the 5QI is
+ * not delay-critical GBR (no CN PDB extension is then signalled). */
+static const smf_cn_pdb_t *smf_cn_pdb_lookup(uint8_t five_qi)
+{
+    unsigned int i;
+    for (i = 0; i < OGS_ARRAY_SIZE(smf_cn_pdb_table); i++) {
+        if (smf_cn_pdb_table[i].five_qi == five_qi)
+            return &smf_cn_pdb_table[i];
+    }
+    return NULL;
+}
+
+static void smf_ngap_log_tsc_qfi_skip(smf_sess_t *sess, uint8_t flow_qfi)
+{
+    if (sess->tsc && sess->tsc->status == SMF_TSC_STATUS_ACTIVE &&
+            flow_qfi != sess->tsc->qfi)
+        ogs_info("[SMF] CP6_DBG ngap_tsc_skip: flow_qfi[%d] tsc_qfi[%d] "
+                 "tsc_pcc_rule[%s]",
+                 flow_qfi, sess->tsc->qfi, sess->tsc->pcc_rule_id);
+}
+
+/*
+ * Build one NGAP TSC Assistance Information (TS 38.413 §9.3.1.131) from the
+ * SMF-local TSC context, for a single direction. Carries the mandatory
+ * Periodicity (5G-domain, µs), the optional Burst Arrival Time (only when the
+ * 5G-domain value exists), and the optional Survival Time extension (id 327)
+ * when present.
+ */
+static NGAP_TSCAssistanceInformation_t *smf_ngap_build_tsc_assistance(
+        const smf_tsc_context_t *tsc)
+{
+    NGAP_TSCAssistanceInformation_t *tscai = NULL;
+    uint32_t periodicity_5g = 0;
+    uint64_t bat_5g = 0;
+    bool has_bat = false;
+
+    smf_sess_tsc_derive(tsc, &periodicity_5g, &bat_5g, &has_bat);
+
+    tscai = CALLOC(1, sizeof(NGAP_TSCAssistanceInformation_t));
+    ogs_assert(tscai);
+
+    /* Periodicity: INTEGER (0..640000), unit 1 µs (TS 38.413 §9.3.1.132). */
+    tscai->periodicity = (NGAP_Periodicity_t)periodicity_5g;
+
+    if (has_bat) {
+        /* Burst Arrival Time: OCTET STRING (ReferenceTime), already 5G-domain.
+         * 8-octet big-endian carrier; exact ReferenceTime formatting follows
+         * the clock-drift conversion when the value is first produced. */
+        uint8_t buf[8];
+        int i;
+        for (i = 7; i >= 0; i--) {
+            buf[i] = (uint8_t)(bat_5g & 0xff);
+            bat_5g >>= 8;
+        }
+        tscai->burstArrivalTime =
+            CALLOC(1, sizeof(NGAP_BurstArrivalTime_t));
+        ogs_assert(tscai->burstArrivalTime);
+        ogs_assert(OCTET_STRING_fromBuf(
+                tscai->burstArrivalTime, (const char *)buf, sizeof(buf)) == 0);
+    }
+
+    if (tsc->survival_time_us > 0) {
+        /* Survival Time extension (id 327) on the TSC Assistance Information. */
+        NGAP_ProtocolExtensionContainer_11905P339_t *extContainer = NULL;
+        NGAP_TSCAssistanceInformation_ExtIEs_t *extIe = NULL;
+
+        extContainer = CALLOC(1,
+                sizeof(NGAP_ProtocolExtensionContainer_11905P339_t));
+        ogs_assert(extContainer);
+        tscai->iE_Extensions =
+            (struct NGAP_ProtocolExtensionContainer *)extContainer;
+
+        extIe = CALLOC(1, sizeof(NGAP_TSCAssistanceInformation_ExtIEs_t));
+        ogs_assert(extIe);
+        ASN_SEQUENCE_ADD(&extContainer->list, extIe);
+
+        extIe->id = NGAP_ProtocolIE_ID_id_SurvivalTime;
+        extIe->criticality = NGAP_Criticality_ignore;
+        extIe->extensionValue.present =
+            NGAP_TSCAssistanceInformation_ExtIEs__extensionValue_PR_SurvivalTime;
+        extIe->extensionValue.choice.SurvivalTime =
+            (NGAP_SurvivalTime_t)tsc->survival_time_us;
+    }
+
+    return tscai;
+}
+
+/*
+ * Fill the NGAP QoS Characteristics IE from the flow QoS. When the QoS carries
+ * operator-defined Dynamic 5QI characteristics (TS 23.501 §5.7.3) a
+ * Dynamic5QIDescriptor is built (TS 38.413 §9.3.1.18); otherwise the
+ * standardized NonDynamic5QIDescriptor is used.
+ */
+static void smf_ngap_build_qos_characteristics(
+        NGAP_QosCharacteristics_t *qosCharacteristics, ogs_qos_t *qos)
+{
+    ogs_assert(qosCharacteristics);
+    ogs_assert(qos);
+
+    if (qos->dyn_5qi.is_dynamic) {
+        NGAP_Dynamic5QIDescriptor_t *dynamic5QI =
+            CALLOC(1, sizeof(NGAP_Dynamic5QIDescriptor_t));
+        ogs_assert(dynamic5QI);
+        qosCharacteristics->present = NGAP_QosCharacteristics_PR_dynamic5QI;
+        qosCharacteristics->choice.dynamic5QI = dynamic5QI;
+
+        dynamic5QI->priorityLevelQos = qos->dyn_5qi.priority_level;
+        dynamic5QI->packetDelayBudget = qos->dyn_5qi.packet_delay_budget;
+        dynamic5QI->packetErrorRate.pERScalar =
+            qos->dyn_5qi.packet_error_rate.scalar;
+        dynamic5QI->packetErrorRate.pERExponent =
+            qos->dyn_5qi.packet_error_rate.exponent;
+
+        /* Optional reference 5QI (TS 38.413 §9.3.1.18): the gNB derives its DRB
+         * configuration from this standardized 5QI; the dynamic characteristics
+         * above override the standardized ones for the scheduler. */
+        if (qos->index) {
+            dynamic5QI->fiveQI = CALLOC(1, sizeof(NGAP_FiveQI_t));
+            ogs_assert(dynamic5QI->fiveQI);
+            *dynamic5QI->fiveQI = qos->index;
+        }
+
+        if (qos->dyn_5qi.delay_critical) {
+            dynamic5QI->delayCritical =
+                CALLOC(1, sizeof(NGAP_DelayCritical_t));
+            ogs_assert(dynamic5QI->delayCritical);
+            *dynamic5QI->delayCritical = NGAP_DelayCritical_delay_critical;
+        }
+        if (qos->dyn_5qi.averaging_window) {
+            dynamic5QI->averagingWindow =
+                CALLOC(1, sizeof(NGAP_AveragingWindow_t));
+            ogs_assert(dynamic5QI->averagingWindow);
+            *dynamic5QI->averagingWindow = qos->dyn_5qi.averaging_window;
+        }
+        if (qos->dyn_5qi.max_data_burst_volume) {
+            dynamic5QI->maximumDataBurstVolume =
+                CALLOC(1, sizeof(NGAP_MaximumDataBurstVolume_t));
+            ogs_assert(dynamic5QI->maximumDataBurstVolume);
+            *dynamic5QI->maximumDataBurstVolume =
+                qos->dyn_5qi.max_data_burst_volume;
+        }
+        return;
+    }
+
+    NGAP_NonDynamic5QIDescriptor_t *nonDynamic5QI =
+        CALLOC(1, sizeof(NGAP_NonDynamic5QIDescriptor_t));
+    ogs_assert(nonDynamic5QI);
+    qosCharacteristics->present = NGAP_QosCharacteristics_PR_nonDynamic5QI;
+    qosCharacteristics->choice.nonDynamic5QI = nonDynamic5QI;
+    nonDynamic5QI->fiveQI = qos->index;
+
+    /* Explicit MDBV on a standardized 5QI overrides the 5QI table default
+     * (TS 38.413 §9.3.1.28; TS 23.501 §5.7.3.7), so the gNB sizes the CG/SPS
+     * grant to the real TSC burst. NonDynamic path only — Dynamic path above
+     * is pre-existing and carries its own MDBV without a separate log. */
+    if (qos->dyn_5qi.max_data_burst_volume) {
+        nonDynamic5QI->maximumDataBurstVolume =
+            CALLOC(1, sizeof(NGAP_MaximumDataBurstVolume_t));
+        ogs_assert(nonDynamic5QI->maximumDataBurstVolume);
+        *nonDynamic5QI->maximumDataBurstVolume =
+            qos->dyn_5qi.max_data_burst_volume;
+        ogs_info("[SMF] NGAP MDBV encoded on NonDynamic5QI: 5QI[%d] MDBV[%d B]",
+                 qos->index, qos->dyn_5qi.max_data_burst_volume);
+    }
+
+    /* CN Packet Delay Budget DL/UL extension (TS 38.413 §9.3.1.28, ext IEs 187/188;
+     * ExtendedPacketDelayBudget in 0.01 ms units) so the gNB can subtract it from the
+     * standardized 5QI PDB to get the 5G-AN PDB (TS 23.501 §5.7.3.4). Per-5QI: only
+     * delay-critical GBR 5QIs in the table carry it; others (e.g. 5QI 9) get none.
+     * Mirrors the TSC Survival-Time extension idiom above. */
+    const smf_cn_pdb_t *cn_pdb = smf_cn_pdb_lookup(qos->index);
+    if (cn_pdb && (cn_pdb->cn_pdb_dl_001ms > 0 || cn_pdb->cn_pdb_ul_001ms > 0)) {
+        NGAP_ProtocolExtensionContainer_11905P193_t *extContainer =
+            CALLOC(1, sizeof(NGAP_ProtocolExtensionContainer_11905P193_t));
+        ogs_assert(extContainer);
+        nonDynamic5QI->iE_Extensions =
+            (struct NGAP_ProtocolExtensionContainer *)extContainer;
+
+        if (cn_pdb->cn_pdb_dl_001ms > 0) {
+            NGAP_NonDynamic5QIDescriptor_ExtIEs_t *dlIe =
+                CALLOC(1, sizeof(NGAP_NonDynamic5QIDescriptor_ExtIEs_t));
+            ogs_assert(dlIe);
+            ASN_SEQUENCE_ADD(&extContainer->list, dlIe);
+            dlIe->id = NGAP_ProtocolIE_ID_id_CNPacketDelayBudgetDL;
+            dlIe->criticality = NGAP_Criticality_ignore;
+            dlIe->extensionValue.present =
+                NGAP_NonDynamic5QIDescriptor_ExtIEs__extensionValue_PR_ExtendedPacketDelayBudget;
+            dlIe->extensionValue.choice.ExtendedPacketDelayBudget =
+                cn_pdb->cn_pdb_dl_001ms;
+        }
+        if (cn_pdb->cn_pdb_ul_001ms > 0) {
+            NGAP_NonDynamic5QIDescriptor_ExtIEs_t *ulIe =
+                CALLOC(1, sizeof(NGAP_NonDynamic5QIDescriptor_ExtIEs_t));
+            ogs_assert(ulIe);
+            ASN_SEQUENCE_ADD(&extContainer->list, ulIe);
+            ulIe->id = NGAP_ProtocolIE_ID_id_CNPacketDelayBudgetUL;
+            ulIe->criticality = NGAP_Criticality_ignore;
+            ulIe->extensionValue.present =
+                NGAP_NonDynamic5QIDescriptor_ExtIEs__extensionValue_PR_ExtendedPacketDelayBudget_1;
+            ulIe->extensionValue.choice.ExtendedPacketDelayBudget_1 =
+                cn_pdb->cn_pdb_ul_001ms;
+        }
+        ogs_info("[SMF] NGAP CN PDB encoded on NonDynamic5QI: 5QI[%d] DL[%d x0.01ms] "
+                 "UL[%d x0.01ms]", qos->index,
+                 cn_pdb->cn_pdb_dl_001ms, cn_pdb->cn_pdb_ul_001ms);
+    }
+}
+
 /**
  * Fill common QoS flow level parameters: 5QI, ARP, and optional GBR/MBR.
  */
@@ -29,8 +269,6 @@ static void fill_qos_level_parameters(
 {
     NGAP_AllocationAndRetentionPriority_t
         *allocationAndRetentionPriority = NULL;
-    NGAP_QosCharacteristics_t *qosCharacteristics = NULL;
-    NGAP_NonDynamic5QIDescriptor_t *nonDynamic5QI = NULL;
 
     /* Allocation and Retention Priority */
     allocationAndRetentionPriority =
@@ -44,14 +282,8 @@ static void fill_qos_level_parameters(
         allocationAndRetentionPriority->pre_emptionVulnerability =
             NGAP_Pre_emptionVulnerability_pre_emptable;
 
-    /* Non-Dynamic 5QI Descriptor */
-    qosCharacteristics = &params->qosCharacteristics;
-    qosCharacteristics->choice.nonDynamic5QI = nonDynamic5QI =
-        CALLOC(1, sizeof(struct NGAP_NonDynamic5QIDescriptor));
-    ogs_assert(nonDynamic5QI);
-    qosCharacteristics->present = NGAP_QosCharacteristics_PR_nonDynamic5QI;
-
-    nonDynamic5QI->fiveQI = qos->index;
+    smf_ngap_build_qos_characteristics(
+            &params->qosCharacteristics, (ogs_qos_t *)qos);
 
     /* Optional GBR/MBR Information */
     if (include_gbr &&
@@ -186,6 +418,9 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_setup_request_transfer(
         break;
     case OGS_PDU_SESSION_TYPE_IPV4V6 :
         *PDUSessionType = NGAP_PDUSessionType_ipv4v6;
+        break;
+    case OGS_PDU_SESSION_TYPE_ETHERNET :
+        *PDUSessionType = NGAP_PDUSessionType_ethernet;
         break;
     default:
         ogs_fatal("Unknown PDU Session Type [%d]", sess->session.session_type);
@@ -359,6 +594,58 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_setup_request_transfer(
             fill_qos_level_parameters(
                     &QosFlowSetupRequestItem->qosFlowLevelQosParameters,
                     &qos_flow->qos, true);
+
+        /* Attach TSC Traffic Characteristics (id 196) on this QoS Flow Setup
+         * Request Item when the session carries TSC assistance for this QFI.
+         * Direction selects the DL/UL sub-IE(s). Baseline flows add nothing. */
+        smf_ngap_log_tsc_qfi_skip(sess, qos_flow->qfi);
+        if (sess->tsc && sess->tsc->status == SMF_TSC_STATUS_ACTIVE &&
+                qos_flow->qfi == sess->tsc->qfi) {
+            NGAP_ProtocolExtensionContainer_11905P280_t *tscExtContainer = NULL;
+            NGAP_QosFlowSetupRequestItem_ExtIEs_t *tscExtIe = NULL;
+            NGAP_TSCTrafficCharacteristics_t *TSCTrafficCharacteristics = NULL;
+
+            tscExtContainer = CALLOC(1,
+                    sizeof(NGAP_ProtocolExtensionContainer_11905P280_t));
+            ogs_assert(tscExtContainer);
+            QosFlowSetupRequestItem->iE_Extensions =
+                (struct NGAP_ProtocolExtensionContainer *)tscExtContainer;
+
+            tscExtIe = CALLOC(1, sizeof(NGAP_QosFlowSetupRequestItem_ExtIEs_t));
+            ogs_assert(tscExtIe);
+            ASN_SEQUENCE_ADD(&tscExtContainer->list, tscExtIe);
+
+            tscExtIe->id = NGAP_ProtocolIE_ID_id_TSCTrafficCharacteristics;
+            tscExtIe->criticality = NGAP_Criticality_ignore;
+            tscExtIe->extensionValue.present =
+                NGAP_QosFlowSetupRequestItem_ExtIEs__extensionValue_PR_TSCTrafficCharacteristics;
+
+            TSCTrafficCharacteristics =
+                &tscExtIe->extensionValue.choice.TSCTrafficCharacteristics;
+
+            if (sess->tsc->direction == SMF_TSC_DIR_DL ||
+                    sess->tsc->direction == SMF_TSC_DIR_BOTH)
+                TSCTrafficCharacteristics->tSCAssistanceInformationDL =
+                    smf_ngap_build_tsc_assistance(sess->tsc);
+            if (sess->tsc->direction == SMF_TSC_DIR_UL ||
+                    sess->tsc->direction == SMF_TSC_DIR_BOTH)
+                TSCTrafficCharacteristics->tSCAssistanceInformationUL =
+                    smf_ngap_build_tsc_assistance(sess->tsc);
+
+            ogs_info("[SMF] NGAP TSC Traffic Characteristics encoded: "
+                     "QFI[%d] dir[%d] periodicity[%llu us]",
+                     qos_flow->qfi, sess->tsc->direction,
+                     (unsigned long long)sess->tsc->periodicity_us);
+        } else if (sess->tsc && sess->tsc->status != SMF_TSC_STATUS_ABSENT &&
+                qos_flow->qfi == sess->tsc->qfi) {
+            /* TSC was requested for this flow but is not ACTIVE (PARTIAL or
+             * DOWNGRADED) — omit the IE and run on the 5QI. The reason is
+             * surfaced so the baseline fallback is explicit in logs. */
+            ogs_warn("[SMF] NGAP TSC IE omitted: QFI[%d] status[%d] reason[%s] "
+                     "-- flow proceeds on baseline 5QI",
+                     qos_flow->qfi, sess->tsc->status,
+                     sess->tsc->downgrade_reason);
+        }
         }
     }
 
@@ -393,6 +680,11 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_modify_request_transfer(
 
     QosFlowAddOrModifyRequestList =
         &ie->value.choice.QosFlowAddOrModifyRequestList;
+
+    if (sess->tsc)
+        sess->tsc->n2_tsc_encoded = false;
+
+    smf_tsc_bind_qfi(sess);
 
     /* Home-Routed V-SMF: QoS flow */
     if (HOME_ROUTED_ROAMING_IN_VSMF(sess)) {
@@ -480,6 +772,67 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_modify_request_transfer(
                     fill_qos_level_parameters(
                             QosFlowAddOrModifyRequestItem->
                                 qosFlowLevelQosParameters, &qos, true);
+
+                    /* TSC Traffic Characteristics on the Modify path (home-routed). */
+                    smf_tsc_bind_qfi(sess);
+                    smf_ngap_log_tsc_qfi_skip(sess,
+                            (uint8_t)qosFlowAddModRequestItem->qfi);
+                    if (sess->tsc && sess->tsc->status == SMF_TSC_STATUS_ACTIVE &&
+                            (qosFlowAddModRequestItem->qfi == sess->tsc->qfi ||
+                            (sess->tsc->qfi == 0 &&
+                             qos.index == SMF_TSC_GBR_5QI))) {
+                        if (sess->tsc->qfi == 0) {
+                            sess->tsc->qfi =
+                                (uint8_t)qosFlowAddModRequestItem->qfi;
+                            ogs_info("[SMF] CP6_DBG tsc_qfi_bind: PSI[%d] "
+                                     "pcc_rule_id[%s] qfi[%d]",
+                                     sess->psi, sess->tsc->pcc_rule_id,
+                                     sess->tsc->qfi);
+                        }
+                        NGAP_ProtocolExtensionContainer_11905P269_t *tscExtContainer = NULL;
+                        NGAP_QosFlowAddOrModifyRequestItem_ExtIEs_t *tscExtIe = NULL;
+                        NGAP_TSCTrafficCharacteristics_t *TSCTrafficCharacteristics = NULL;
+
+                        tscExtContainer = CALLOC(1,
+                                sizeof(NGAP_ProtocolExtensionContainer_11905P269_t));
+                        ogs_assert(tscExtContainer);
+                        QosFlowAddOrModifyRequestItem->iE_Extensions =
+                            (struct NGAP_ProtocolExtensionContainer *)tscExtContainer;
+
+                        tscExtIe = CALLOC(1,
+                                sizeof(NGAP_QosFlowAddOrModifyRequestItem_ExtIEs_t));
+                        ogs_assert(tscExtIe);
+                        ASN_SEQUENCE_ADD(&tscExtContainer->list, tscExtIe);
+
+                        tscExtIe->id = NGAP_ProtocolIE_ID_id_TSCTrafficCharacteristics;
+                        tscExtIe->criticality = NGAP_Criticality_ignore;
+                        tscExtIe->extensionValue.present =
+                            NGAP_QosFlowAddOrModifyRequestItem_ExtIEs__extensionValue_PR_TSCTrafficCharacteristics;
+
+                        TSCTrafficCharacteristics =
+                            &tscExtIe->extensionValue.choice.TSCTrafficCharacteristics;
+
+                        if (sess->tsc->direction == SMF_TSC_DIR_DL ||
+                                sess->tsc->direction == SMF_TSC_DIR_BOTH)
+                            TSCTrafficCharacteristics->tSCAssistanceInformationDL =
+                                smf_ngap_build_tsc_assistance(sess->tsc);
+                        if (sess->tsc->direction == SMF_TSC_DIR_UL ||
+                                sess->tsc->direction == SMF_TSC_DIR_BOTH)
+                            TSCTrafficCharacteristics->tSCAssistanceInformationUL =
+                                smf_ngap_build_tsc_assistance(sess->tsc);
+
+                        ogs_info("[SMF] NGAP TSC Traffic Characteristics encoded (modify): "
+                                 "QFI[%d] dir[%d] periodicity[%llu us]",
+                                 qosFlowAddModRequestItem->qfi, sess->tsc->direction,
+                                 (unsigned long long)sess->tsc->periodicity_us);
+                        sess->tsc->n2_tsc_encoded = true;
+                    } else if (sess->tsc && sess->tsc->status != SMF_TSC_STATUS_ABSENT &&
+                            qosFlowAddModRequestItem->qfi == sess->tsc->qfi) {
+                        ogs_warn("[SMF] NGAP TSC IE omitted (modify): QFI[%d] status[%d] "
+                                 "reason[%s] -- flow proceeds on baseline 5QI",
+                                 qosFlowAddModRequestItem->qfi, sess->tsc->status,
+                                 sess->tsc->downgrade_reason);
+                    }
                 }
             }
         }
@@ -503,6 +856,55 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_modify_request_transfer(
             fill_qos_level_parameters(
                     QosFlowAddOrModifyRequestItem->qosFlowLevelQosParameters,
                     &qos_flow->qos, include_gbr);
+
+            /* TSC Traffic Characteristics on the Modify path. */
+            smf_tsc_bind_qfi(sess);
+            smf_ngap_log_tsc_qfi_skip(sess, qos_flow->qfi);
+            if (smf_tsc_ngap_encode_on_qos_flow(sess, qos_flow)) {
+                NGAP_ProtocolExtensionContainer_11905P269_t *tscExtContainer = NULL;
+                NGAP_QosFlowAddOrModifyRequestItem_ExtIEs_t *tscExtIe = NULL;
+                NGAP_TSCTrafficCharacteristics_t *TSCTrafficCharacteristics = NULL;
+
+                tscExtContainer = CALLOC(1,
+                        sizeof(NGAP_ProtocolExtensionContainer_11905P269_t));
+                ogs_assert(tscExtContainer);
+                QosFlowAddOrModifyRequestItem->iE_Extensions =
+                    (struct NGAP_ProtocolExtensionContainer *)tscExtContainer;
+
+                tscExtIe = CALLOC(1,
+                        sizeof(NGAP_QosFlowAddOrModifyRequestItem_ExtIEs_t));
+                ogs_assert(tscExtIe);
+                ASN_SEQUENCE_ADD(&tscExtContainer->list, tscExtIe);
+
+                tscExtIe->id = NGAP_ProtocolIE_ID_id_TSCTrafficCharacteristics;
+                tscExtIe->criticality = NGAP_Criticality_ignore;
+                tscExtIe->extensionValue.present =
+                    NGAP_QosFlowAddOrModifyRequestItem_ExtIEs__extensionValue_PR_TSCTrafficCharacteristics;
+
+                TSCTrafficCharacteristics =
+                    &tscExtIe->extensionValue.choice.TSCTrafficCharacteristics;
+
+                if (sess->tsc->direction == SMF_TSC_DIR_DL ||
+                        sess->tsc->direction == SMF_TSC_DIR_BOTH)
+                    TSCTrafficCharacteristics->tSCAssistanceInformationDL =
+                        smf_ngap_build_tsc_assistance(sess->tsc);
+                if (sess->tsc->direction == SMF_TSC_DIR_UL ||
+                        sess->tsc->direction == SMF_TSC_DIR_BOTH)
+                    TSCTrafficCharacteristics->tSCAssistanceInformationUL =
+                        smf_ngap_build_tsc_assistance(sess->tsc);
+
+                ogs_info("[SMF] NGAP TSC Traffic Characteristics encoded (modify): "
+                         "QFI[%d] dir[%d] periodicity[%llu us]",
+                         qos_flow->qfi, sess->tsc->direction,
+                         (unsigned long long)sess->tsc->periodicity_us);
+                sess->tsc->n2_tsc_encoded = true;
+            } else if (sess->tsc && sess->tsc->status != SMF_TSC_STATUS_ABSENT &&
+                    qos_flow->qfi == sess->tsc->qfi) {
+                ogs_warn("[SMF] NGAP TSC IE omitted (modify): QFI[%d] status[%d] "
+                         "reason[%s] -- flow proceeds on baseline 5QI",
+                         qos_flow->qfi, sess->tsc->status,
+                         sess->tsc->downgrade_reason);
+            }
         }
     }
 

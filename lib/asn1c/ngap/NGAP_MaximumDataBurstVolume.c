@@ -38,7 +38,12 @@ NGAP_MaximumDataBurstVolume_constraint(const asn_TYPE_descriptor_t *td, const vo
  */
 #if !defined(ASN_DISABLE_UPER_SUPPORT) || !defined(ASN_DISABLE_APER_SUPPORT)
 asn_per_constraints_t asn_PER_type_NGAP_MaximumDataBurstVolume_constr_1 CC_NOTUSED = {
-	{ APC_CONSTRAINED | APC_EXTENSIBLE,  21, -1,  0,  2000000 }	/* (0..2000000,...) */,
+	/* TS 38.413 R17 §9.3.1.62: MaximumDataBurstVolume ::= INTEGER
+	 * (0..4095, ..., 4096..2000000). The root range is 0..4095 (12 bits),
+	 * NOT the full 0..2000000 — asn1c-0.9.29 collapsed the extension into the
+	 * root, producing a 21-bit encoding that conformant peers (gNB) cannot
+	 * decode. Correct it to the spec root so APER matches the standard. */
+	{ APC_CONSTRAINED | APC_EXTENSIBLE,  12,  12,  0,  4095 }	/* (0..4095,...,4096..2000000) */,
 	{ APC_UNCONSTRAINED,	-1, -1,  0,  0 },
 	0, 0	/* No PER value map */
 };

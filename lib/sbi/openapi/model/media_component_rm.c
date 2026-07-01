@@ -74,7 +74,9 @@ OpenAPI_media_component_rm_t *OpenAPI_media_component_rm_create(
     bool is_tscai_input_ul_null,
     OpenAPI_tscai_input_container_t *tscai_input_ul,
     bool is_tscai_time_dom,
-    int tscai_time_dom
+    int tscai_time_dom,
+    bool is_max_data_burst_vol,
+    int max_data_burst_vol
 )
 {
     OpenAPI_media_component_rm_t *media_component_rm_local_var = ogs_malloc(sizeof(OpenAPI_media_component_rm_t));
@@ -150,6 +152,8 @@ OpenAPI_media_component_rm_t *OpenAPI_media_component_rm_create(
     media_component_rm_local_var->tscai_input_ul = tscai_input_ul;
     media_component_rm_local_var->is_tscai_time_dom = is_tscai_time_dom;
     media_component_rm_local_var->tscai_time_dom = tscai_time_dom;
+    media_component_rm_local_var->is_max_data_burst_vol = is_max_data_burst_vol;
+    media_component_rm_local_var->max_data_burst_vol = max_data_burst_vol;
 
     return media_component_rm_local_var;
 }
@@ -741,6 +745,13 @@ cJSON *OpenAPI_media_component_rm_convertToJSON(OpenAPI_media_component_rm_t *me
     }
     }
 
+    if (media_component_rm->is_max_data_burst_vol) {
+    if (cJSON_AddNumberToObject(item, "maxDataBurstVol", media_component_rm->max_data_burst_vol) == NULL) {
+        ogs_error("OpenAPI_media_component_rm_convertToJSON() failed [max_data_burst_vol]");
+        goto end;
+    }
+    }
+
 end:
     return item;
 }
@@ -800,6 +811,7 @@ OpenAPI_media_component_rm_t *OpenAPI_media_component_rm_parseFromJSON(cJSON *me
     cJSON *tscai_input_ul = NULL;
     OpenAPI_tscai_input_container_t *tscai_input_ul_local_nonprim = NULL;
     cJSON *tscai_time_dom = NULL;
+    cJSON *max_data_burst_vol = NULL;
     af_app_id = cJSON_GetObjectItemCaseSensitive(media_component_rmJSON, "afAppId");
     if (af_app_id) {
     if (!cJSON_IsString(af_app_id) && !cJSON_IsNull(af_app_id)) {
@@ -1216,6 +1228,14 @@ OpenAPI_media_component_rm_t *OpenAPI_media_component_rm_parseFromJSON(cJSON *me
     }
     }
 
+    max_data_burst_vol = cJSON_GetObjectItemCaseSensitive(media_component_rmJSON, "maxDataBurstVol");
+    if (max_data_burst_vol) {
+    if (!cJSON_IsNumber(max_data_burst_vol)) {
+        ogs_error("OpenAPI_media_component_rm_parseFromJSON() failed [max_data_burst_vol]");
+        goto end;
+    }
+    }
+
     media_component_rm_local_var = OpenAPI_media_component_rm_create (
         af_app_id && !cJSON_IsNull(af_app_id) ? ogs_strdup(af_app_id->valuestring) : NULL,
         af_rout_req && cJSON_IsNull(af_rout_req) ? true : false,
@@ -1287,7 +1307,9 @@ OpenAPI_media_component_rm_t *OpenAPI_media_component_rm_parseFromJSON(cJSON *me
         tscai_input_ul && cJSON_IsNull(tscai_input_ul) ? true : false,
         tscai_input_ul ? tscai_input_ul_local_nonprim : NULL,
         tscai_time_dom ? true : false,
-        tscai_time_dom ? tscai_time_dom->valuedouble : 0
+        tscai_time_dom ? tscai_time_dom->valuedouble : 0,
+        max_data_burst_vol ? true : false,
+        max_data_burst_vol ? max_data_burst_vol->valuedouble : 0
     );
 
     return media_component_rm_local_var;

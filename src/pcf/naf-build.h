@@ -29,6 +29,15 @@ extern "C" {
 ogs_sbi_request_t *pcf_naf_callback_build_policyauthorization_terminate(
         pcf_app_t *app_session, void *data);
 
+/* Build the PCF -> TSN AF new-bridge notification POST (TS 29.514 §4.2.5.16):
+ * POST {notifUri}/new-bridge with a PduSessionTsnBridge body (§5.6.2.40). The
+ * tsnBridgeInfo carries bridgeId, dsttPortNum, dsttAddr (DS-TT port MAC from
+ * N1) and dsttResidTime (UE-DS-TT residence time, ns). */
+ogs_sbi_request_t *pcf_naf_build_tsn_bridge_new_bridge(
+        const char *af_uri,
+        int bridge_id, int ds_tt_port, const char *ds_tt_mac,
+        bool has_resid_time, int resid_time_ns);
+
 #ifdef __cplusplus
 }
 #endif

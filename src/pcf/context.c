@@ -33,6 +33,7 @@ static int context_initialized = 0;
 static void pcf_qos_profile_clear(void);
 static void clear_ipv4addr(pcf_sess_t *sess);
 static void clear_ipv6prefix(pcf_sess_t *sess);
+static void clear_mac_addr(pcf_sess_t *sess);
 
 void pcf_context_init(void)
 {
@@ -60,6 +61,8 @@ void pcf_context_init(void)
     ogs_assert(self.ipv4addr_hash);
     self.ipv6prefix_hash = ogs_hash_make();
     ogs_assert(self.ipv6prefix_hash);
+    self.mac_addr_hash = ogs_hash_make();
+    ogs_assert(self.mac_addr_hash);
 
     context_initialized = 1;
 }
@@ -81,6 +84,11 @@ void pcf_context_final(void)
     ogs_hash_destroy(self.ipv4addr_hash);
     ogs_assert(self.ipv6prefix_hash);
     ogs_hash_destroy(self.ipv6prefix_hash);
+    ogs_assert(self.mac_addr_hash);
+    ogs_hash_destroy(self.mac_addr_hash);
+
+    ogs_free(self.tsn_af_bridge_uri);
+    self.tsn_af_bridge_uri = NULL;
 
     ogs_pool_final(&pcf_app_pool);
     ogs_pool_final(&pcf_sess_pool);
@@ -366,9 +374,9 @@ static int parse_qos_profiles_conf(ogs_yaml_iter_t *parent)
             goto next;
         }
 
-        if (self.num_of_qos_profile >= OGS_PCF_MAX_NUM_OF_QOS_PROFILE) {
+        if (self.num_of_qos_profile >= PCF_MAX_NUM_OF_QOS_PROFILE) {
             ogs_warn("Ignore qos_profiles[%s] beyond max [%d]",
-                    reference, OGS_PCF_MAX_NUM_OF_QOS_PROFILE);
+                    reference, PCF_MAX_NUM_OF_QOS_PROFILE);
             goto next;
         }
 
@@ -436,6 +444,8 @@ int pcf_context_parse_config(void)
                         ogs_error("parse_policy_conf() failed");
                         return rv;
                     }
+                } else if (!strcmp(pcf_key, "tsn_af_bridge_uri")) {
+                    self.tsn_af_bridge_uri = ogs_strdup(ogs_yaml_iter_value(&pcf_iter));
                 } else
                     ogs_warn("unknown key `%s`", pcf_key);
             }
@@ -691,6 +701,7 @@ void pcf_sess_remove(pcf_sess_t *sess)
 
     clear_ipv4addr(sess);
     clear_ipv6prefix(sess);
+    clear_mac_addr(sess);
 
     OpenAPI_clear_and_free_string_list(sess->ipv4_frame_route_list);
     OpenAPI_clear_and_free_string_list(sess->ipv6_frame_route_list);
@@ -733,6 +744,49 @@ static void clear_ipv6prefix(pcf_sess_t *sess)
                 &sess->ipv6prefix, (sess->ipv6prefix.len >> 3) + 1, NULL);
         ogs_free(sess->ipv6prefix_string);
     }
+}
+
+static void clear_mac_addr(pcf_sess_t *sess)
+{
+    ogs_assert(sess);
+
+    if (sess->mac_addr48_string) {
+        ogs_hash_set(self.mac_addr_hash, sess->mac_addr, 6, NULL);
+        ogs_free(sess->mac_addr48_string);
+        sess->mac_addr48_string = NULL;
+    }
+}
+
+bool pcf_sess_set_mac_addr(pcf_sess_t *sess, char *mac_addr48_string)
+{
+    ogs_assert(sess);
+    ogs_assert(mac_addr48_string);
+
+    clear_mac_addr(sess);
+
+    if (ogs_mac_from_string(sess->mac_addr, mac_addr48_string) == false) {
+        ogs_error("ogs_mac_from_string[%s] failed", mac_addr48_string);
+        return false;
+    }
+    sess->mac_addr48_string = ogs_strdup(mac_addr48_string);
+    if (!sess->mac_addr48_string) {
+        ogs_error("ogs_strdup() failed");
+        return false;
+    }
+    ogs_hash_set(self.mac_addr_hash, sess->mac_addr, 6, sess);
+    return true;
+}
+
+pcf_sess_t *pcf_sess_find_by_mac_addr(char *mac_addr48_string)
+{
+    uint8_t mac[6];
+    ogs_assert(mac_addr48_string);
+
+    if (ogs_mac_from_string(mac, mac_addr48_string) == false) {
+        ogs_error("ogs_mac_from_string() failed");
+        return NULL;
+    }
+    return ogs_hash_get(self.mac_addr_hash, mac, 6);
 }
 
 bool pcf_sess_set_ipv4addr(pcf_sess_t *sess, char *ipv4addr_string)

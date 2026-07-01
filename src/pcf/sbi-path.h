@@ -57,6 +57,13 @@ bool pcf_sbi_send_smpolicycontrol_delete_notify(
 
 bool pcf_sbi_send_policyauthorization_terminate_notify(pcf_app_t *app);
 
+/* PCF -> TSN AF new-bridge notification (TS 29.514 §4.2.5.16): POST a
+ * PduSessionTsnBridge to {notifUri}/new-bridge. tsnBridgeInfo = bridgeId,
+ * dsttPortNum, dsttAddr (DS-TT port MAC from N1), dsttResidTime (ns). */
+bool pcf_sbi_send_tsn_bridge_new_bridge(
+        int bridge_id, int ds_tt_port, const char *ds_tt_mac,
+        bool has_resid_time, int resid_time_ns);
+
 #ifdef __cplusplus
 }
 #endif

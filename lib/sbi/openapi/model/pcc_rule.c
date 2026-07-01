@@ -49,7 +49,9 @@ OpenAPI_pcc_rule_t *OpenAPI_pcc_rule_create(
     bool is_dis_ue_notif,
     int dis_ue_notif,
     bool is_pack_filt_all_prec,
-    int pack_filt_all_prec
+    int pack_filt_all_prec,
+    bool is_max_data_burst_vol,
+    int max_data_burst_vol
 )
 {
     OpenAPI_pcc_rule_t *pcc_rule_local_var = ogs_malloc(sizeof(OpenAPI_pcc_rule_t));
@@ -100,6 +102,8 @@ OpenAPI_pcc_rule_t *OpenAPI_pcc_rule_create(
     pcc_rule_local_var->dis_ue_notif = dis_ue_notif;
     pcc_rule_local_var->is_pack_filt_all_prec = is_pack_filt_all_prec;
     pcc_rule_local_var->pack_filt_all_prec = pack_filt_all_prec;
+    pcc_rule_local_var->is_max_data_burst_vol = is_max_data_burst_vol;
+    pcc_rule_local_var->max_data_burst_vol = max_data_burst_vol;
 
     return pcc_rule_local_var;
 }
@@ -548,6 +552,13 @@ cJSON *OpenAPI_pcc_rule_convertToJSON(OpenAPI_pcc_rule_t *pcc_rule)
     }
     }
 
+    if (pcc_rule->is_max_data_burst_vol) {
+    if (cJSON_AddNumberToObject(item, "maxDataBurstVol", pcc_rule->max_data_burst_vol) == NULL) {
+        ogs_error("OpenAPI_pcc_rule_convertToJSON() failed [max_data_burst_vol]");
+        goto end;
+    }
+    }
+
 end:
     return item;
 }
@@ -596,6 +607,7 @@ OpenAPI_pcc_rule_t *OpenAPI_pcc_rule_parseFromJSON(cJSON *pcc_ruleJSON)
     OpenAPI_downlink_data_notification_control_rm_t *dd_notif_ctrl2_local_nonprim = NULL;
     cJSON *dis_ue_notif = NULL;
     cJSON *pack_filt_all_prec = NULL;
+    cJSON *max_data_burst_vol = NULL;
     flow_infos = cJSON_GetObjectItemCaseSensitive(pcc_ruleJSON, "flowInfos");
     if (flow_infos) {
         cJSON *flow_infos_local = NULL;
@@ -953,6 +965,14 @@ OpenAPI_pcc_rule_t *OpenAPI_pcc_rule_parseFromJSON(cJSON *pcc_ruleJSON)
     }
     }
 
+    max_data_burst_vol = cJSON_GetObjectItemCaseSensitive(pcc_ruleJSON, "maxDataBurstVol");
+    if (max_data_burst_vol) {
+    if (!cJSON_IsNumber(max_data_burst_vol)) {
+        ogs_error("OpenAPI_pcc_rule_parseFromJSON() failed [max_data_burst_vol]");
+        goto end;
+    }
+    }
+
     pcc_rule_local_var = OpenAPI_pcc_rule_create (
         flow_infos ? flow_infosList : NULL,
         app_id && !cJSON_IsNull(app_id) ? ogs_strdup(app_id->valuestring) : NULL,
@@ -998,7 +1018,9 @@ OpenAPI_pcc_rule_t *OpenAPI_pcc_rule_parseFromJSON(cJSON *pcc_ruleJSON)
         dis_ue_notif ? true : false,
         dis_ue_notif ? dis_ue_notif->valueint : 0,
         pack_filt_all_prec ? true : false,
-        pack_filt_all_prec ? pack_filt_all_prec->valuedouble : 0
+        pack_filt_all_prec ? pack_filt_all_prec->valuedouble : 0,
+        max_data_burst_vol ? true : false,
+        max_data_burst_vol ? max_data_burst_vol->valuedouble : 0
     );
 
     return pcc_rule_local_var;

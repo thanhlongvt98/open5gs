@@ -1534,6 +1534,10 @@ typedef struct ogs_pfcp_user_plane_report_s {
         ogs_pfcp_duration_measurement_t dur_measurement;
         ogs_pfcp_time_of_first_packet_t time_of_first_packet;
         ogs_pfcp_time_of_last_packet_t time_of_last_packet;
+        /* Ethernet Traffic Information -> MAC Addresses Detected
+         * (TS 29.244 §8.2.96). Pre-encoded IE payload: [count][MAC*6]... */
+        uint16_t mac_addresses_detected_len;
+        uint8_t  mac_addresses_detected[64];
     } usage_report [OGS_MAX_NUM_OF_URR];
     unsigned int num_of_usage_report;
     struct {
@@ -1727,6 +1731,10 @@ ED3(uint8_t     spare:6;,
     };
 } __attribute__ ((packed)) ogs_pfcp_sereq_flags_t;
 
+int ogs_pfcp_encode_eth_packet_filter(
+        ogs_pfcp_tlv_ethernet_packet_filter_t *tlv,
+        const ogs_pf_content_t *c, uint32_t filter_id, bool is_bid,
+        uint8_t *mac_buf, uint8_t *ctag_buf, uint8_t *ethertype_buf);
 #ifdef __cplusplus
 }
 #endif

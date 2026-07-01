@@ -586,6 +586,19 @@ ogs_pfcp_pdr_t *ogs_pfcp_handle_create_pdr(ogs_pfcp_sess_t *sess,
             memcpy(&rule->ipfw, &oppsite_direction_rule->ipfw,
                     sizeof(rule->ipfw));
             ogs_ipfw_rule_swap(&rule->ipfw);
+
+            /* TSN Ethernet packet filter (TS 24.501 §9.11.4.13): the L2 match
+             * lives in eth_content, not ipfw, so carry it (and is_eth) to the
+             * opposite-direction rule too. Copied as-is (NOT swapped): the
+             * per-direction MAC interpretation is applied at match time in the
+             * UPF (upf_eth_frame_matches swap_mac — DL/CORE swaps, UL/ACCESS
+             * does not). Without this the UL (ACCESS) eth PDR falls back to IP
+             * matching, never matches the L2 frame, and the UPF drops every UL
+             * stream frame with a GTP-U Error Indication. */
+            if (oppsite_direction_rule->is_eth) {
+                rule->is_eth = true;
+                rule->eth_content = oppsite_direction_rule->eth_content;
+            }
         }
 
         /* If BID, Store SDF Filter ID */
@@ -603,8 +616,10 @@ ogs_pfcp_pdr_t *ogs_pfcp_handle_create_pdr(ogs_pfcp_sess_t *sess,
                     sdf_filter.flow_description,
                     sdf_filter.flow_description_len+1);
 
+            /* Ethernet flows arrive via Ethernet Packet Filter IEs
+             * (TS 29.244 §5.13, decoded below the SDF filter loop);
+             * SDF filter FD carries IP-only IPFilterRule descriptions. */
             rv = ogs_ipfw_compile_rule(&rule->ipfw, flow_description);
-
             if (rv != OGS_OK) {
                 ogs_error("ogs_ipfw_compile_rule() failed [%s]",
                         flow_description);
@@ -648,6 +663,27 @@ ogs_pfcp_pdr_t *ogs_pfcp_handle_create_pdr(ogs_pfcp_sess_t *sess,
             /* Uplink data flow */
             if (pdr->src_if == OGS_PFCP_INTERFACE_ACCESS)
                 ogs_ipfw_rule_swap(&rule->ipfw);
+        }
+    }
+
+    /* Ethernet Packet Filter (TS 29.244 §5.13, type 132). Each IE is one L2
+     * filter (e.g. a TSN stream and gPTP arrive as separate IEs); install one
+     * Ethernet rule per IE so the UPF can match every TSN-stream identity. */
+    for (i = 0; i < ogs_min(
+                OGS_ARRAY_SIZE(message->pdi.ethernet_packet_filter),
+                OGS_MAX_NUM_OF_FLOW_IN_PDR); i++) {
+        ogs_pfcp_rule_t *eth_rule = NULL;
+
+        if (message->pdi.ethernet_packet_filter[i].presence == 0)
+            break;
+
+        eth_rule = ogs_pfcp_rule_add(pdr);
+        ogs_assert(eth_rule);
+        rv = ogs_pfcp_parse_eth_packet_filter(
+                eth_rule, &message->pdi.ethernet_packet_filter[i]);
+        if (rv != OGS_OK) {
+            ogs_error("ogs_pfcp_parse_eth_packet_filter() failed");
+            ogs_pfcp_rule_remove(eth_rule);
         }
     }
 
@@ -977,6 +1013,14 @@ ogs_pfcp_pdr_t *ogs_pfcp_handle_update_pdr(ogs_pfcp_sess_t *sess,
                 memcpy(&rule->ipfw, &oppsite_direction_rule->ipfw,
                         sizeof(rule->ipfw));
                 ogs_ipfw_rule_swap(&rule->ipfw);
+
+                /* TSN Ethernet packet filter (TS 24.501 §9.11.4.13): the L2 match
+                 * lives in eth_content, not ipfw, so carry it (and is_eth) to the
+                 * opposite-direction rule too. */
+                if (oppsite_direction_rule->is_eth) {
+                    rule->is_eth = true;
+                    rule->eth_content = oppsite_direction_rule->eth_content;
+                }
             }
 
             /* If BID, Store SDF Filter ID */
@@ -994,6 +1038,9 @@ ogs_pfcp_pdr_t *ogs_pfcp_handle_update_pdr(ogs_pfcp_sess_t *sess,
                         sdf_filter.flow_description,
                         sdf_filter.flow_description_len+1);
 
+                /* Ethernet flows arrive via Ethernet Packet Filter IEs
+                 * (TS 29.244 §5.13, decoded below the SDF filter loop);
+                 * SDF filter FD carries IP-only IPFilterRule descriptions. */
                 rv = ogs_ipfw_compile_rule(&rule->ipfw, flow_description);
                 if (rv != OGS_OK) {
                     ogs_error("ogs_ipfw_compile_rule() failed [%s]",
@@ -1038,6 +1085,28 @@ ogs_pfcp_pdr_t *ogs_pfcp_handle_update_pdr(ogs_pfcp_sess_t *sess,
                 /* Uplink data flow */
                 if (pdr->src_if == OGS_PFCP_INTERFACE_ACCESS)
                     ogs_ipfw_rule_swap(&rule->ipfw);
+            }
+        }
+
+        /* Ethernet Packet Filter (TS 29.244 §5.13, type 132). Each IE is one L2
+         * filter (e.g. a TSN stream and gPTP arrive as separate IEs); install
+         * one Ethernet rule per IE so the UPF can match every TSN-stream
+         * identity. */
+        for (i = 0; i < ogs_min(
+                    OGS_ARRAY_SIZE(message->pdi.ethernet_packet_filter),
+                    OGS_MAX_NUM_OF_FLOW_IN_PDR); i++) {
+            ogs_pfcp_rule_t *eth_rule = NULL;
+
+            if (message->pdi.ethernet_packet_filter[i].presence == 0)
+                break;
+
+            eth_rule = ogs_pfcp_rule_add(pdr);
+            ogs_assert(eth_rule);
+            rv = ogs_pfcp_parse_eth_packet_filter(
+                    eth_rule, &message->pdi.ethernet_packet_filter[i]);
+            if (rv != OGS_OK) {
+                ogs_error("ogs_pfcp_parse_eth_packet_filter() failed");
+                ogs_pfcp_rule_remove(eth_rule);
             }
         }
 

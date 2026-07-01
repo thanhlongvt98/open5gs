@@ -1030,7 +1030,7 @@ typedef struct ogs_pfcp_tlv_pdi_s {
     ogs_pfcp_tlv_sdf_filter_t sdf_filter[8];
     ogs_pfcp_tlv_application_id_t application_id;
     ogs_pfcp_tlv_ethernet_pdu_session_information_t ethernet_pdu_session_information;
-    ogs_pfcp_tlv_ethernet_packet_filter_t ethernet_packet_filter;
+    ogs_pfcp_tlv_ethernet_packet_filter_t ethernet_packet_filter[8];
     ogs_pfcp_tlv_qfi_t qfi;
     ogs_pfcp_tlv_framed_route_t framed_route[8];
     ogs_pfcp_tlv_framed_routing_t framed_routing;

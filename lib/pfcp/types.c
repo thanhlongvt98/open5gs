@@ -839,3 +839,182 @@ int16_t ogs_pfcp_build_user_id(
 
     return octet->len;
 }
+
+int ogs_pfcp_encode_eth_packet_filter(
+        ogs_pfcp_tlv_ethernet_packet_filter_t *tlv,
+        const ogs_pf_content_t *c, uint32_t filter_id, bool is_bid,
+        uint8_t *mac_buf, uint8_t *ctag_buf, uint8_t *ethertype_buf)
+{
+    int k;
+    bool has_dst = false, has_src = false;
+    bool has_vid = false, has_pcp_dei = false;
+    uint8_t dst_mac[6], src_mac[6];
+    uint16_t vid = 0, pcp_dei = 0, ethertype = 0;
+    bool has_ethertype = false;
+
+    ogs_assert(tlv);
+    ogs_assert(c);
+    ogs_assert(mac_buf);
+    ogs_assert(ctag_buf);
+    ogs_assert(ethertype_buf);
+
+    memset(tlv, 0, sizeof(*tlv));
+
+    for (k = 0; k < c->num_of_component; k++) {
+        switch (c->component[k].type) {
+        case 0x81: /* DST_MAC */
+            memcpy(dst_mac, c->component[k].mac, 6);
+            has_dst = true;
+            break;
+        case 0x82: /* SRC_MAC */
+            memcpy(src_mac, c->component[k].mac, 6);
+            has_src = true;
+            break;
+        case 0x83: /* C_TAG_VID */
+            vid = c->component[k].vid;
+            has_vid = true;
+            break;
+        case 0x85: /* C_TAG_PCP_DEI */
+            pcp_dei = c->component[k].pcp_dei;
+            has_pcp_dei = true;
+            break;
+        case 0x87: /* ETHERTYPE */
+            ethertype = c->component[k].ethertype;
+            has_ethertype = true;
+            break;
+        default:
+            break;
+        }
+    }
+
+    /* MAC Address IE (TS 29.244 §8.2.94):
+     * Byte 0: flags (bit1=SOUR=0x01, bit2=DEST=0x02)
+     * Bytes 1-6:  DST MAC (if DEST set)
+     * Bytes 7-12: SRC MAC (if SOUR set, after DST) */
+    if (has_dst || has_src) {
+        uint8_t flags = 0;
+        uint32_t off = 1;
+
+        if (has_dst) flags |= 0x02;
+        if (has_src) flags |= 0x01;
+
+        mac_buf[0] = flags;
+        if (has_dst) {
+            memcpy(mac_buf + off, dst_mac, 6);
+            off += 6;
+        }
+        if (has_src) {
+            memcpy(mac_buf + off, src_mac, 6);
+            off += 6;
+        }
+
+        tlv->mac_address.presence = 1;
+        tlv->mac_address.data = mac_buf;
+        tlv->mac_address.len = off;
+    }
+
+    /* C-TAG IE (TS 29.244 §8.2.95):
+     * Byte 0: flags (bit3=VID_value=0x04, bit2=PCP_Value=0x02, bit1=DEI_flag=0x01)
+     * Bytes 1-2: PCP(3b)|DEI(1b)|VID(12b) big-endian uint16 */
+    if (has_vid || has_pcp_dei) {
+        uint8_t cflags = 0;
+        uint16_t tci = 0;
+
+        if (has_vid)     { cflags |= 0x04; tci |= (vid & 0x0FFF); }
+        if (has_pcp_dei) { cflags |= 0x02; tci |= (uint16_t)((pcp_dei & 0x0F) << 12); }
+
+        ctag_buf[0] = cflags;
+        ctag_buf[1] = (tci >> 8) & 0xFF;
+        ctag_buf[2] = tci & 0xFF;
+
+        tlv->c_tag.presence = 1;
+        tlv->c_tag.data = ctag_buf;
+        tlv->c_tag.len = 3;
+    }
+
+    /* EtherType IE (TS 29.244 §8.2.98): 2 bytes big-endian */
+    if (has_ethertype) {
+        ethertype_buf[0] = (ethertype >> 8) & 0xFF;
+        ethertype_buf[1] = ethertype & 0xFF;
+
+        tlv->ethertype.presence = 1;
+        tlv->ethertype.data = ethertype_buf;
+        tlv->ethertype.len = 2;
+    }
+
+    /* Ethernet Filter ID (TS 29.244 §8.2.93):
+     * Informational; UPF uses PDR ID for identification.
+     * Skip: filter_id storage would need a separate 4-byte buffer per call;
+     * the UPF does not require this IE to match the filter. */
+    (void)filter_id;
+    (void)is_bid;
+
+    tlv->presence = 1;
+
+    return OGS_OK;
+}
+
+int ogs_pfcp_parse_eth_packet_filter(
+        ogs_pfcp_rule_t *rule,
+        const ogs_pfcp_tlv_ethernet_packet_filter_t *tlv)
+{
+    ogs_pf_content_t *c;
+    int n;
+
+    ogs_assert(rule);
+    ogs_assert(tlv);
+
+    rule->is_eth = true;
+    c = &rule->eth_content;
+    memset(c, 0, sizeof(*c));
+    n = 0;
+
+    /* MAC Address IE (TS 29.244 §8.2.94) */
+    if (tlv->mac_address.presence && tlv->mac_address.len >= 1) {
+        const uint8_t *d = (const uint8_t *)tlv->mac_address.data;
+        uint8_t flags = d[0];
+        uint32_t off = 1;
+
+        if ((flags & 0x02) && (uint32_t)tlv->mac_address.len >= off + 6) {
+            c->component[n].type = 0x81; /* DST_MAC */
+            memcpy(c->component[n].mac, d + off, 6);
+            off += 6;
+            n++;
+        }
+        if ((flags & 0x01) && (uint32_t)tlv->mac_address.len >= off + 6) {
+            c->component[n].type = 0x82; /* SRC_MAC */
+            memcpy(c->component[n].mac, d + off, 6);
+            n++;
+        }
+    }
+
+    /* C-TAG IE (TS 29.244 §8.2.95) */
+    if (tlv->c_tag.presence && tlv->c_tag.len >= 3) {
+        const uint8_t *d = (const uint8_t *)tlv->c_tag.data;
+        uint8_t cflags = d[0];
+        uint16_t tci = ((uint16_t)d[1] << 8) | d[2];
+
+        if (cflags & 0x04) {
+            c->component[n].type = 0x83; /* C_TAG_VID */
+            c->component[n].vid = tci & 0x0FFF;
+            n++;
+        }
+        if (cflags & 0x02) {
+            c->component[n].type = 0x85; /* C_TAG_PCP_DEI */
+            c->component[n].pcp_dei = (tci >> 12) & 0x0F;
+            n++;
+        }
+    }
+
+    /* EtherType IE (TS 29.244 §8.2.98) */
+    if (tlv->ethertype.presence && tlv->ethertype.len >= 2) {
+        const uint8_t *d = (const uint8_t *)tlv->ethertype.data;
+        c->component[n].type = 0x87; /* ETHERTYPE */
+        c->component[n].ethertype = ((uint16_t)d[0] << 8) | d[1];
+        n++;
+    }
+
+    c->num_of_component = n;
+
+    return OGS_OK;
+}

@@ -19,6 +19,7 @@
 
 #include "ogs-sbi.h"
 #include "yuarel.h"
+#include "ipfw/ogs-ipfw.h"
 
 static int parse_scheme_output(
         char *_protection_scheme_id, char *_scheme_output,
@@ -1532,7 +1533,109 @@ OpenAPI_pcc_rule_t *ogs_sbi_build_pcc_rule(
             }
 
             ogs_assert(flow->description);
-            FlowInformation->flow_description = flow->description;
+
+            if (strncmp(flow->description, "eth|", 4) == 0) {
+                /* Ethernet flow: encode as EthFlowDescription on N7 wire,
+                 * NOT as flowDescription (which is IPFilterRule-only). */
+                ogs_pf_content_t c;
+                OpenAPI_eth_flow_description_t *eth_fd = NULL;
+                OpenAPI_list_t *vlan_tags = NULL;
+                char *dest_mac = NULL, *src_mac = NULL, *eth_type = NULL;
+                char mac_str[18];
+                int j;
+
+                ogs_pf_content_from_eth_sentinel(flow->description, &c);
+
+                eth_fd = ogs_calloc(1, sizeof(*eth_fd));
+                ogs_assert(eth_fd);
+
+                for (j = 0; j < (int)c.num_of_component; j++) {
+                    switch (c.component[j].type) {
+                    case OGS_PACKET_FILTER_DESTINATION_MAC_ADDRESS_TYPE:
+                        ogs_snprintf(mac_str, sizeof(mac_str),
+                                "%02x:%02x:%02x:%02x:%02x:%02x",
+                                c.component[j].mac[0], c.component[j].mac[1],
+                                c.component[j].mac[2], c.component[j].mac[3],
+                                c.component[j].mac[4], c.component[j].mac[5]);
+                        dest_mac = ogs_strdup(mac_str);
+                        break;
+                    case OGS_PACKET_FILTER_SOURCE_MAC_ADDRESS_TYPE:
+                        ogs_snprintf(mac_str, sizeof(mac_str),
+                                "%02x:%02x:%02x:%02x:%02x:%02x",
+                                c.component[j].mac[0], c.component[j].mac[1],
+                                c.component[j].mac[2], c.component[j].mac[3],
+                                c.component[j].mac[4], c.component[j].mac[5]);
+                        src_mac = ogs_strdup(mac_str);
+                        break;
+                    case OGS_PACKET_FILTER_ETHERTYPE_TYPE:
+                        eth_type = ogs_msprintf("%04x",
+                                c.component[j].ethertype);
+                        break;
+                    case OGS_PACKET_FILTER_8021Q_C_TAG_VID_TYPE:
+                    case OGS_PACKET_FILTER_8021Q_C_TAG_PCP_DEI_TYPE:
+                        /* collected below after scanning all components */
+                        break;
+                    default:
+                        break;
+                    }
+                }
+
+                /* Build vlan_tags list from VID + PCP components */
+                {
+                    uint16_t vid = 0;
+                    uint8_t pcp = 0;
+                    bool has_vid = false, has_pcp = false;
+
+                    for (j = 0; j < (int)c.num_of_component; j++) {
+                        if (c.component[j].type ==
+                                OGS_PACKET_FILTER_8021Q_C_TAG_VID_TYPE) {
+                            vid = c.component[j].vid;
+                            has_vid = true;
+                        } else if (c.component[j].type ==
+                                OGS_PACKET_FILTER_8021Q_C_TAG_PCP_DEI_TYPE) {
+                            /* pcp_dei stored as (pcp << 1); recover pcp */
+                            pcp = (c.component[j].pcp_dei >> 1) & 0x7;
+                            has_pcp = true;
+                        }
+                    }
+
+                    if (has_vid || has_pcp) {
+                        char tag_str[32];
+                        /* Encode as "pcp=<N>,vid=<VID>" covering all
+                         * present sub-fields in a single string element. */
+                        if (has_pcp && has_vid)
+                            ogs_snprintf(tag_str, sizeof(tag_str),
+                                    "pcp=%u,vid=%u", (unsigned)pcp,
+                                    (unsigned)vid);
+                        else if (has_vid)
+                            ogs_snprintf(tag_str, sizeof(tag_str),
+                                    "vid=%u", (unsigned)vid);
+                        else
+                            ogs_snprintf(tag_str, sizeof(tag_str),
+                                    "pcp=%u", (unsigned)pcp);
+
+                        vlan_tags = OpenAPI_list_create();
+                        ogs_assert(vlan_tags);
+                        OpenAPI_list_add(vlan_tags, ogs_strdup(tag_str));
+                    }
+                }
+
+                /* ethType is mandatory in EthFlowDescription; default "0000"
+                 * if absent in the sentinel (should not happen in practice). */
+                if (!eth_type)
+                    eth_type = ogs_strdup("0000");
+
+                eth_fd->dest_mac_addr   = dest_mac;
+                eth_fd->source_mac_addr = src_mac;
+                eth_fd->eth_type        = eth_type;
+                eth_fd->vlan_tags       = vlan_tags;
+                /* f_desc / f_dir / *_end not used for TSN sentinels */
+
+                FlowInformation->eth_flow_description = eth_fd;
+                /* Do NOT set flow_description for Ethernet flows */
+            } else {
+                FlowInformation->flow_description = flow->description;
+            }
 
             OpenAPI_list_add(FlowInformationList, FlowInformation);
         }
@@ -1541,6 +1644,39 @@ OpenAPI_pcc_rule_t *ogs_sbi_build_pcc_rule(
             PccRule->flow_infos = FlowInformationList;
         else
             OpenAPI_list_free(FlowInformationList);
+    }
+
+    /* Emit the standard TSCAI input containers (TS 29.512) when the PCC rule
+     * carries TSC assistance. The OpenAPI container owns the strdup'd
+     * burst_arrival_time string. */
+    if (pcc_rule->tscai_input_dl.present) {
+        ogs_tscai_input_t *t = &pcc_rule->tscai_input_dl;
+        PccRule->tscai_input_dl = OpenAPI_tscai_input_container_create(
+                t->is_periodicity, t->periodicity,
+                t->burst_arrival_time[0] ? ogs_strdup(t->burst_arrival_time) :
+                    NULL,
+                t->is_sur_time_in_num_msg, t->sur_time_in_num_msg,
+                t->is_sur_time_in_time, t->sur_time_in_time);
+        ogs_assert(PccRule->tscai_input_dl);
+    }
+    if (pcc_rule->tscai_input_ul.present) {
+        ogs_tscai_input_t *t = &pcc_rule->tscai_input_ul;
+        PccRule->tscai_input_ul = OpenAPI_tscai_input_container_create(
+                t->is_periodicity, t->periodicity,
+                t->burst_arrival_time[0] ? ogs_strdup(t->burst_arrival_time) :
+                    NULL,
+                t->is_sur_time_in_num_msg, t->sur_time_in_num_msg,
+                t->is_sur_time_in_time, t->sur_time_in_time);
+        ogs_assert(PccRule->tscai_input_ul);
+    }
+
+    /* Carry the true TSC burst (MDBV) PCF->SMF on the PccRule so the SMF can
+     * emit it as the NonDynamic5QI maximumDataBurstVolume, overriding the 5QI
+     * table default (TS 38.413 §9.3.1.28; TS 23.501 §5.7.3.7). Scalar field —
+     * no free needed in ogs_sbi_free_pcc_rule(). */
+    if (pcc_rule->qos.dyn_5qi.max_data_burst_volume > 0) {
+        PccRule->is_max_data_burst_vol = true;
+        PccRule->max_data_burst_vol = pcc_rule->qos.dyn_5qi.max_data_burst_volume;
     }
 
     return PccRule;
@@ -1562,6 +1698,11 @@ void ogs_sbi_free_pcc_rule(OpenAPI_pcc_rule_t *PccRule)
         }
         OpenAPI_list_free(PccRule->flow_infos);
     }
+    /* Free the TSCAI containers built in ogs_sbi_build_pcc_rule(). */
+    if (PccRule->tscai_input_dl)
+        OpenAPI_tscai_input_container_free(PccRule->tscai_input_dl);
+    if (PccRule->tscai_input_ul)
+        OpenAPI_tscai_input_container_free(PccRule->tscai_input_ul);
     ogs_free(PccRule);
 }
 
@@ -1623,7 +1764,48 @@ OpenAPI_qos_data_t *ogs_sbi_build_qos_data(ogs_pcc_rule_t *pcc_rule)
         QosData->gbr_dl = ogs_sbi_bitrate_to_string(
                 pcc_rule->qos.gbr.downlink, OGS_SBI_BITRATE_BPS);
 
+    /* For an operator-defined dynamic 5QI (TS 23.501 §5.7.4) the QosData carries
+     * only the assigned (dynamic) 5QI value in `5qi` (already set from
+     * pcc_rule->qos.index above) plus ARP and GBR/MBR. The 5G QoS
+     * characteristics travel separately in the SmPolicyDecision `qosChars`
+     * (TS 29.512 §4.2.6.6.3), built by ogs_sbi_build_qos_characteristics(). */
+
     return QosData;
+}
+
+OpenAPI_qos_characteristics_t *ogs_sbi_build_qos_characteristics(
+        ogs_pcc_rule_t *pcc_rule)
+{
+    ogs_dyn_5qi_t *dyn = NULL;
+    char *per = NULL;
+
+    ogs_assert(pcc_rule);
+    if (!pcc_rule->qos.dyn_5qi.is_dynamic)
+        return NULL;
+
+    dyn = &pcc_rule->qos.dyn_5qi;
+
+    /* TS 29.512 §5.6.2.16 QosCharacteristics: the authorized 5G QoS
+     * characteristics for the dynamically assigned 5QI. resourceType for a TSC
+     * flow is delay-critical GBR (TS 23.501 §5.27.3). packetErrorRate is the
+     * TS 29.571 PacketErrRate string form "<scalar>E-<exponent>". */
+    per = ogs_msprintf("%uE-%u",
+            dyn->packet_error_rate.scalar, dyn->packet_error_rate.exponent);
+    ogs_assert(per);
+
+    return OpenAPI_qos_characteristics_create(
+            dyn->five_qi,
+            dyn->delay_critical ?
+                OpenAPI_qos_resource_type_CRITICAL_GBR :
+                OpenAPI_qos_resource_type_NON_CRITICAL_GBR,
+            dyn->priority_level,
+            dyn->packet_delay_budget,
+            per,
+            dyn->averaging_window ? true : false,
+            dyn->averaging_window,
+            dyn->max_data_burst_volume ? true : false,
+            dyn->max_data_burst_volume,
+            false, 0);
 }
 
 void ogs_sbi_free_qos_data(OpenAPI_qos_data_t *QosData)
@@ -1635,6 +1817,7 @@ void ogs_sbi_free_qos_data(OpenAPI_qos_data_t *QosData)
     if (QosData->maxbr_dl) ogs_free(QosData->maxbr_dl);
     if (QosData->gbr_ul) ogs_free(QosData->gbr_ul);
     if (QosData->gbr_dl) ogs_free(QosData->gbr_dl);
+    if (QosData->packet_error_rate) ogs_free(QosData->packet_error_rate);
 
     ogs_free(QosData);
 }

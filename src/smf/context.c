@@ -90,6 +90,7 @@ void smf_context_init(void)
             ogs_app()->pool.bearer * OGS_MAX_NUM_OF_FLOW_IN_BEARER);
 
     ogs_pool_init(&smf_sess_pool, ogs_app()->pool.sess);
+    smf_tsc_context_pool_init(ogs_app()->pool.sess);
     ogs_pool_init(&smf_n4_seid_pool, ogs_app()->pool.sess);
     ogs_pool_random_id_generate(&smf_n4_seid_pool);
 
@@ -135,6 +136,7 @@ void smf_context_final(void)
     ogs_pool_final(&smf_bearer_pool);
     ogs_pool_final(&smf_pf_pool);
 
+    smf_tsc_context_pool_final();
     ogs_pool_final(&smf_sess_pool);
     ogs_pool_final(&smf_n4_seid_pool);
 
@@ -1989,6 +1991,12 @@ uint8_t smf_sess_set_ue_ip(smf_sess_t *sess)
                 sess->ipv4->addr, OGS_IPV4_LEN, sess);
         ogs_hash_set(smf_self()->ipv6_hash,
                 sess->ipv6->addr, OGS_IPV6_DEFAULT_PREFIX_LEN >> 3, sess);
+    } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_ETHERNET) {
+        /* Ethernet PDU session (TS 23.501 §5.6.10.2): no UE IP address is
+         * allocated. L2 reachability is handled by the UPF NW-TT bridge
+         * (MAC learning), and the N1 ACCEPT omits the PDU Address IE. */
+        sess->ipv4 = NULL;
+        sess->ipv6 = NULL;
     } else {
         ogs_fatal("Invalid sess->session.session_type[%d]",
                 sess->session.session_type);
@@ -2172,6 +2180,15 @@ void smf_sess_remove(smf_sess_t *sess)
         ogs_free(sess->aaa_server_identifier.name);
     if (sess->aaa_server_identifier.realm)
         ogs_free(sess->aaa_server_identifier.realm);
+
+    /* free SMF-local TSC context (no-op when sess->tsc NULL). */
+    smf_sess_tsc_remove(sess);
+
+    /* Free the per-port PMIC blobs. */
+    if (sess->tsc_bridge.dstt_pmic)
+        ogs_free(sess->tsc_bridge.dstt_pmic);
+    if (sess->tsc_bridge.nwtt_pmic)
+        ogs_free(sess->tsc_bridge.nwtt_pmic);
 
     smf_bearer_remove_all(sess);
 
@@ -2364,8 +2381,23 @@ smf_bearer_t *smf_qos_flow_add(smf_sess_t *sess)
         ul_pdr->src_if_type = OGS_PFCP_3GPP_INTERFACE_TYPE_N3_3GPP_ACCESS;
 
     ul_pdr->outer_header_removal_len = 1;
-    ul_pdr->outer_header_removal.description =
-        OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IP;
+    if (sess->session.session_type == OGS_PDU_SESSION_TYPE_IPV4) {
+        ul_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IPV4;
+    } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_IPV6) {
+        ul_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IPV6;
+    } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_IPV4V6) {
+        ul_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IP;
+    } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_ETHERNET) {
+        /* Ethernet PDU session: strip GTP-U/UDP/IP, leave inner L2 frame. */
+        ul_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IP;
+    } else {
+        ogs_error("Invalid session_type [%d]", sess->session.session_type);
+        ogs_assert_if_reached();
+    }
 
     /* FAR */
     dl_far = ogs_pfcp_far_add(&sess->pfcp);
@@ -2569,8 +2601,24 @@ void smf_sess_create_indirect_data_forwarding(smf_sess_t *sess)
             OGS_PFCP_3GPP_INTERFACE_TYPE_SGW_UPF_GTP_U_FOR_UL_DATA_FORWARDING;
 
         pdr->outer_header_removal_len = 1;
-        pdr->outer_header_removal.description =
-            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IP;
+        if (sess->session.session_type == OGS_PDU_SESSION_TYPE_IPV4) {
+            pdr->outer_header_removal.description =
+                OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IPV4;
+        } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_IPV6) {
+            pdr->outer_header_removal.description =
+                OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IPV6;
+        } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_IPV4V6) {
+            pdr->outer_header_removal.description =
+                OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IP;
+        } else if (sess->session.session_type ==
+                OGS_PDU_SESSION_TYPE_ETHERNET) {
+            /* Ethernet PDU session: strip GTP-U/UDP/IP, leave inner L2 frame. */
+            pdr->outer_header_removal.description =
+                OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IP;
+        } else {
+            ogs_error("Invalid session_type [%d]", sess->session.session_type);
+            ogs_assert_if_reached();
+        }
 
         far = ogs_pfcp_far_add(&sess->pfcp);
         ogs_assert(far);
@@ -2753,8 +2801,23 @@ void smf_sess_create_cp_up_data_forwarding(smf_sess_t *sess)
     cp2up_pdr->src_if = OGS_PFCP_INTERFACE_CP_FUNCTION;
 
     cp2up_pdr->outer_header_removal_len = 1;
-    cp2up_pdr->outer_header_removal.description =
-        OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IP;
+    if (sess->session.session_type == OGS_PDU_SESSION_TYPE_IPV4) {
+        cp2up_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IPV4;
+    } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_IPV6) {
+        cp2up_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IPV6;
+    } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_IPV4V6) {
+        cp2up_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IP;
+    } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_ETHERNET) {
+        /* Ethernet PDU session: strip GTP-U/UDP/IP, leave inner L2 frame. */
+        cp2up_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IP;
+    } else {
+        ogs_error("Invalid session_type [%d]", sess->session.session_type);
+        ogs_assert_if_reached();
+    }
 
     up2cp_pdr = ogs_pfcp_pdr_add(&sess->pfcp);
     ogs_assert(up2cp_pdr);
@@ -2772,8 +2835,23 @@ void smf_sess_create_cp_up_data_forwarding(smf_sess_t *sess)
         up2cp_pdr->src_if_type = OGS_PFCP_3GPP_INTERFACE_TYPE_N3_3GPP_ACCESS;
 
     up2cp_pdr->outer_header_removal_len = 1;
-    up2cp_pdr->outer_header_removal.description =
-        OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IP;
+    if (sess->session.session_type == OGS_PDU_SESSION_TYPE_IPV4) {
+        up2cp_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IPV4;
+    } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_IPV6) {
+        up2cp_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IPV6;
+    } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_IPV4V6) {
+        up2cp_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IP;
+    } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_ETHERNET) {
+        /* Ethernet PDU session: strip GTP-U/UDP/IP, leave inner L2 frame. */
+        up2cp_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IP;
+    } else {
+        ogs_error("Invalid session_type [%d]", sess->session.session_type);
+        ogs_assert_if_reached();
+    }
 
     qos_flow = smf_default_bearer_in_sess(sess);
     ogs_assert(qos_flow);
@@ -2909,8 +2987,23 @@ smf_bearer_t *smf_bearer_add(smf_sess_t *sess)
     ul_pdr->src_if_type = OGS_PFCP_3GPP_INTERFACE_TYPE_N3_3GPP_ACCESS;
 
     ul_pdr->outer_header_removal_len = 1;
-    ul_pdr->outer_header_removal.description =
-        OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IP;
+    if (sess->session.session_type == OGS_PDU_SESSION_TYPE_IPV4) {
+        ul_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IPV4;
+    } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_IPV6) {
+        ul_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IPV6;
+    } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_IPV4V6) {
+        ul_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IP;
+    } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_ETHERNET) {
+        /* Ethernet PDU session: strip GTP-U/UDP/IP, leave inner L2 frame. */
+        ul_pdr->outer_header_removal.description =
+            OGS_PFCP_OUTER_HEADER_REMOVAL_GTPU_UDP_IP;
+    } else {
+        ogs_error("Invalid session_type [%d]", sess->session.session_type);
+        ogs_assert_if_reached();
+    }
 
     /* FAR */
     dl_far = ogs_pfcp_far_add(&sess->pfcp);
@@ -3106,15 +3199,35 @@ void smf_bearer_tft_update(smf_bearer_t *bearer)
                 pf->flow_description;
             ul_pdr->num_of_flow++;
         } else if (pf->direction == OGS_FLOW_BIDIRECTIONAL) {
-            dl_pdr->flow[dl_pdr->num_of_flow].fd = 1;
-            dl_pdr->flow[dl_pdr->num_of_flow].description =
-                pf->flow_description;
-            dl_pdr->flow[dl_pdr->num_of_flow].bid = 1;
-            dl_pdr->flow[dl_pdr->num_of_flow].sdf_filter_id = pf->sdf_filter_id;
-            dl_pdr->num_of_flow++;
-            ul_pdr->flow[ul_pdr->num_of_flow].bid = 1;
-            ul_pdr->flow[ul_pdr->num_of_flow].sdf_filter_id = pf->sdf_filter_id;
-            ul_pdr->num_of_flow++;
+            if (pf->is_eth) {
+                /* TSN Ethernet packet filter (TS 29.244 §5.13): carried as an
+                 * Ethernet Packet Filter IE on both the downlink and uplink
+                 * PDR. The L2 match lives in the filter content (dst/src MAC,
+                 * C-TAG, EtherType), and the UP function applies the
+                 * per-direction MAC interpretation at match time
+                 * (TS 29.244 §5.2.1A.2A), so no bidirectional SDF Filter ID
+                 * linkage is used. */
+                dl_pdr->flow[dl_pdr->num_of_flow].fd = 1;
+                dl_pdr->flow[dl_pdr->num_of_flow].description =
+                    pf->flow_description;
+                dl_pdr->num_of_flow++;
+                ul_pdr->flow[ul_pdr->num_of_flow].fd = 1;
+                ul_pdr->flow[ul_pdr->num_of_flow].description =
+                    pf->flow_description;
+                ul_pdr->num_of_flow++;
+            } else {
+                dl_pdr->flow[dl_pdr->num_of_flow].fd = 1;
+                dl_pdr->flow[dl_pdr->num_of_flow].description =
+                    pf->flow_description;
+                dl_pdr->flow[dl_pdr->num_of_flow].bid = 1;
+                dl_pdr->flow[dl_pdr->num_of_flow].sdf_filter_id =
+                    pf->sdf_filter_id;
+                dl_pdr->num_of_flow++;
+                ul_pdr->flow[ul_pdr->num_of_flow].bid = 1;
+                ul_pdr->flow[ul_pdr->num_of_flow].sdf_filter_id =
+                    pf->sdf_filter_id;
+                ul_pdr->num_of_flow++;
+            }
         } else {
             ogs_fatal("Unsupported direction [%d]", pf->direction);
             ogs_assert_if_reached();

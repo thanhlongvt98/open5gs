@@ -789,6 +789,53 @@ int ogs_nas_build_qos_rules(ogs_nas_qos_rules_t *rules,
                     length +=
                         sizeof(target.pf[j].content.component[k].port.high);
                     break;
+                /* Ethernet packet filter components (TS 24.501 R17 §9.11.4.13)
+                 * for TSN streams on Ethernet PDU sessions. */
+                case OGS_PACKET_FILTER_DESTINATION_MAC_ADDRESS_TYPE:
+                case OGS_PACKET_FILTER_SOURCE_MAC_ADDRESS_TYPE:
+                    /* 6-octet MAC address, network (wire) byte order */
+                    ogs_assert(length +
+                        sizeof(target.pf[j].content.component[k].mac)
+                            <= OGS_NAS_MAX_QOS_RULES_LEN);
+                    memcpy(buffer + length,
+                        target.pf[j].content.component[k].mac,
+                        sizeof(target.pf[j].content.component[k].mac));
+                    length += sizeof(target.pf[j].content.component[k].mac);
+                    break;
+                case OGS_PACKET_FILTER_8021Q_C_TAG_VID_TYPE:
+                    /* 2 octets, 12-bit VID right-justified (bits 16-13 spare) */
+                    ogs_assert(length +
+                        sizeof(target.pf[j].content.component[k].vid)
+                            <= OGS_NAS_MAX_QOS_RULES_LEN);
+                    target.pf[j].content.component[k].vid =
+                        htobe16(target.pf[j].content.component[k].vid & 0x0fff);
+                    memcpy(buffer + length,
+                        &target.pf[j].content.component[k].vid,
+                        sizeof(target.pf[j].content.component[k].vid));
+                    length += sizeof(target.pf[j].content.component[k].vid);
+                    break;
+                case OGS_PACKET_FILTER_8021Q_C_TAG_PCP_DEI_TYPE:
+                    /* 1 octet: bits 4-2 PCP, bit 1 DEI, bits 8-5 spare */
+                    ogs_assert(length +
+                        sizeof(target.pf[j].content.component[k].pcp_dei)
+                            <= OGS_NAS_MAX_QOS_RULES_LEN);
+                    memcpy(buffer + length,
+                        &target.pf[j].content.component[k].pcp_dei,
+                        sizeof(target.pf[j].content.component[k].pcp_dei));
+                    length += sizeof(target.pf[j].content.component[k].pcp_dei);
+                    break;
+                case OGS_PACKET_FILTER_ETHERTYPE_TYPE:
+                    /* 2 octets EtherType, big-endian */
+                    ogs_assert(length +
+                        sizeof(target.pf[j].content.component[k].ethertype)
+                            <= OGS_NAS_MAX_QOS_RULES_LEN);
+                    target.pf[j].content.component[k].ethertype =
+                        htobe16(target.pf[j].content.component[k].ethertype);
+                    memcpy(buffer + length,
+                        &target.pf[j].content.component[k].ethertype,
+                        sizeof(target.pf[j].content.component[k].ethertype));
+                    length += sizeof(target.pf[j].content.component[k].ethertype);
+                    break;
                 default:
                     ogs_fatal("Unknown Packet Filter Type(%d)",
                             target.pf[j].content.component[k].type);
@@ -993,6 +1040,62 @@ static int parse_qos_rules_packet_filter_list(
                     be16toh(rule->pf[i].content.component[j].port.high);
                 len += sizeof(rule->pf[i].content.component[j].port.high);
                 break;
+                /* Ethernet packet filter components (TS 24.501 R17 §9.11.4.13) */
+                case OGS_PACKET_FILTER_DESTINATION_MAC_ADDRESS_TYPE:
+                case OGS_PACKET_FILTER_SOURCE_MAC_ADDRESS_TYPE:
+                    if (size+len+
+                        sizeof(rule->pf[i].content.component[j].mac) > length) {
+                        ogs_error("Overflow : size[%d] len[%d] length[%d]",
+                                size, len, length);
+                        goto cleanup;
+                    }
+                    memcpy(rule->pf[i].content.component[j].mac,
+                        buffer+size+len,
+                        sizeof(rule->pf[i].content.component[j].mac));
+                    len += sizeof(rule->pf[i].content.component[j].mac);
+                    break;
+                case OGS_PACKET_FILTER_8021Q_C_TAG_VID_TYPE:
+                    if (size+len+
+                        sizeof(rule->pf[i].content.component[j].vid) > length) {
+                        ogs_error("Overflow : size[%d] len[%d] length[%d]",
+                                size, len, length);
+                        goto cleanup;
+                    }
+                    memcpy(&rule->pf[i].content.component[j].vid,
+                        buffer+size+len,
+                        sizeof(rule->pf[i].content.component[j].vid));
+                    rule->pf[i].content.component[j].vid =
+                        be16toh(rule->pf[i].content.component[j].vid) & 0x0fff;
+                    len += sizeof(rule->pf[i].content.component[j].vid);
+                    break;
+                case OGS_PACKET_FILTER_8021Q_C_TAG_PCP_DEI_TYPE:
+                    if (size+len+
+                        sizeof(rule->pf[i].content.component[j].pcp_dei) >
+                            length) {
+                        ogs_error("Overflow : size[%d] len[%d] length[%d]",
+                                size, len, length);
+                        goto cleanup;
+                    }
+                    memcpy(&rule->pf[i].content.component[j].pcp_dei,
+                        buffer+size+len,
+                        sizeof(rule->pf[i].content.component[j].pcp_dei));
+                    len += sizeof(rule->pf[i].content.component[j].pcp_dei);
+                    break;
+                case OGS_PACKET_FILTER_ETHERTYPE_TYPE:
+                    if (size+len+
+                        sizeof(rule->pf[i].content.component[j].ethertype) >
+                            length) {
+                        ogs_error("Overflow : size[%d] len[%d] length[%d]",
+                                size, len, length);
+                        goto cleanup;
+                    }
+                    memcpy(&rule->pf[i].content.component[j].ethertype,
+                        buffer+size+len,
+                        sizeof(rule->pf[i].content.component[j].ethertype));
+                    rule->pf[i].content.component[j].ethertype =
+                        be16toh(rule->pf[i].content.component[j].ethertype);
+                    len += sizeof(rule->pf[i].content.component[j].ethertype);
+                    break;
             default:
                 ogs_error("PF[%d] Unknown Packet Filter Type(%d)",
                           i, rule->pf[i].content.component[j].type);
