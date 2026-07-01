@@ -356,6 +356,7 @@ extern "C" {
 #define OGS_SBI_PARAM_FIELDS                        "fields"
 #define OGS_SBI_PARAM_DATASET_NAMES                 "dataset-names"
 #define OGS_SBI_PARAM_IPV4ADDR                      "ipv4Addr"
+#define OGS_SBI_PARAM_MACADDR48                     "macAddr48"
 #define OGS_SBI_PARAM_IPV6PREFIX                    "ipv6Prefix"
 #define OGS_SBI_PARAM_HOME_PLMN_ID                  "home-plmn-id"
 #define OGS_SBI_PARAM_HNRF_URI                      "hnrf-uri"
@@ -528,6 +529,7 @@ typedef struct ogs_sbi_message_s {
 
         char *ipv4addr;
         char *ipv6prefix;
+        char *mac_addr; /* macAddr48 (BSF pcfBindings discovery) */
 
         bool home_plmn_id_presence;
         ogs_plmn_id_t home_plmn_id;
@@ -592,6 +594,7 @@ typedef struct ogs_sbi_message_s {
     OpenAPI_policy_update_t *PolicyUpdate;
     OpenAPI_am_policy_data_t *AmPolicyData;
     OpenAPI_sm_policy_context_data_t *SmPolicyContextData;
+    OpenAPI_sm_policy_update_context_data_t *SmPolicyUpdateContextData;
     OpenAPI_sm_policy_decision_t *SmPolicyDecision;
     OpenAPI_sm_policy_data_t *SmPolicyData;
     OpenAPI_sm_policy_delete_data_t *SmPolicyDeleteData;

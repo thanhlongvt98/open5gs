@@ -25,6 +25,23 @@
 
 #include "ipfw/ipfw2.h"
 
+/*
+ * build_eth_pf_content - parse the PCF sentinel string and populate an
+ * ogs_pf_content_t with Ethernet packet filter components.
+ *
+ * Sentinel format (TS 24.501 §9.11.4.13):
+ *   "eth|<dstMAC>|<srcMAC>|<vid>|<pcp>|<ethertypeHex>"
+ * Each field is "-" when absent. MACs accept ':' or '-' as octet separator.
+ * vid and ethertype are stored host-order; the NAS encoder byte-swaps them.
+ * pcp_dei is stored as (pcp << 1) with DEI=0; UE compares the low nibble.
+ */
+static void build_eth_pf_content(const char *desc, ogs_pf_content_t *content)
+{
+    /* Parsing moved to lib/ipfw so the UPF DL classifier shares the exact same
+     * sentinel decode (TS 24.501 §9.11.4.13). */
+    ogs_pf_content_from_eth_sentinel(desc, content);
+}
+
 static void gtp_bearer_timeout(ogs_gtp_xact_t *xact, void *data)
 {
     smf_bearer_t *bearer = NULL;
@@ -304,6 +321,14 @@ void smf_bearer_binding(smf_sess_t *sess)
                 pf->flow_description = ogs_strdup(flow->description);
                 ogs_assert(pf->flow_description);
 
+                /* TSN Ethernet sentinel: skip IP-only compile/swap/check */
+                if (strncmp(pf->flow_description, "eth|", 4) == 0) {
+                    build_eth_pf_content(pf->flow_description, &pf->eth_content);
+                    pf->is_eth = true;
+                    ogs_list_add(&bearer->pf_to_add_list, &pf->to_add_node);
+                    continue;
+                }
+
                 rv = ogs_ipfw_compile_rule(
                         &pf->ipfw_rule, pf->flow_description);
 /*
@@ -503,6 +528,27 @@ int smf_gtp2_send_update_bearer_request(smf_bearer_t *bearer)
     return rv;
 }
 
+/* Bind the per-session TSC context to the QFI of the PCC rule that carries
+ * TSCAI (TS 23.501 §5.27.2), not the first QoS flow touched in the loop. */
+static void smf_tsc_bind_qfi_if_matching(
+        smf_sess_t *sess, const ogs_pcc_rule_t *pcc_rule,
+        smf_bearer_t *qos_flow)
+{
+    ogs_assert(sess);
+    ogs_assert(pcc_rule);
+    ogs_assert(qos_flow);
+
+    if (!sess->tsc || sess->tsc->pcc_rule_id[0] == '\0')
+        return;
+    if (!pcc_rule->id ||
+            strcmp(pcc_rule->id, sess->tsc->pcc_rule_id) != 0)
+        return;
+
+    sess->tsc->qfi = qos_flow->qfi;
+    ogs_info("[SMF] CP6_DBG tsc_qfi_bind: PSI[%d] pcc_rule_id[%s] qfi[%d]",
+             sess->psi, sess->tsc->pcc_rule_id, qos_flow->qfi);
+}
+
 void smf_qos_flow_binding(smf_sess_t *sess)
 {
     int rv;
@@ -597,10 +643,23 @@ void smf_qos_flow_binding(smf_sess_t *sess)
 
                 memcpy(&qos_flow->qos, &pcc_rule->qos, sizeof(ogs_qos_t));
 
+                smf_tsc_bind_qfi_if_matching(sess, pcc_rule, qos_flow);
+
+                /* A TSC-assisted flow that is not ACTIVE runs on its baseline 5QI
+                 * (the NGAP TSC IE is omitted) — record it so the fallback
+                 * success path is visible at the binding stage. */
+                if (sess->tsc && sess->tsc->qfi == qos_flow->qfi &&
+                        sess->tsc->status != SMF_TSC_STATUS_ACTIVE)
+                    ogs_info("[SMF] QoS flow QFI[%d] on baseline 5QI "
+                             "(TSC status[%d])",
+                             qos_flow->qfi, sess->tsc->status);
+
                 qos_flow_created = true;
 
             } else {
                 ogs_assert(strcmp(qos_flow->pcc_rule.id, pcc_rule->id) == 0);
+
+                smf_tsc_bind_qfi_if_matching(sess, pcc_rule, qos_flow);
 
                 /*
                  * Check if any MBR/GBR value is non-zero. This indicates that
@@ -682,6 +741,14 @@ void smf_qos_flow_binding(smf_sess_t *sess)
                 pf->flow_description = ogs_strdup(flow->description);
                 ogs_assert(pf->flow_description);
 
+                /* TSN Ethernet sentinel: skip IP-only compile/swap/check */
+                if (strncmp(pf->flow_description, "eth|", 4) == 0) {
+                    build_eth_pf_content(pf->flow_description, &pf->eth_content);
+                    pf->is_eth = true;
+                    ogs_list_add(&qos_flow->pf_to_add_list, &pf->to_add_node);
+                    continue;
+                }
+
                 rv = ogs_ipfw_compile_rule(
                         &pf->ipfw_rule, pf->flow_description);
 /*
@@ -727,6 +794,32 @@ void smf_qos_flow_binding(smf_sess_t *sess)
             }
 
             if (qos_flow_created == true) {
+                /* The N3 DL tunnel (gNB TEID/IP) is per-PDU-session and was
+                 * already established on the default flow at session setup
+                 * (TS 23.501 §5.7.1: one N3 tunnel per PDU session, QFI
+                 * distinguishes flows). For a flow ADDED via modify the gNB
+                 * reuses that tunnel; in this OCUDU deployment the N1 QoS rule
+                 * is delivered via DL NAS Transport, so no PDU Session Resource
+                 * Modify Response arrives to run
+                 * ngap_handle_pdu_session_resource_modify_response_transfer(),
+                 * which is what normally copies the gNB N3 DL tunnel onto the
+                 * new flow's DL FAR. Without that, the new DL FAR egresses on
+                 * TEID 0 (frames lost). The session N3 DL outer header already
+                 * lives on the default flow's DL FAR (set at session setup in
+                 * ngap_handle_pdu_session_resource_setup_response_transfer);
+                 * copy it onto the new QoS flow so DL traffic rides the session
+                 * tunnel. */
+                smf_bearer_t *default_dl = smf_default_bearer_in_sess(sess);
+                if (qos_flow->dl_far && default_dl && default_dl->dl_far &&
+                        default_dl->dl_far->outer_header_creation.teid) {
+                    qos_flow->dl_far->apply_action = OGS_PFCP_APPLY_ACTION_FORW;
+                    memcpy(&qos_flow->dl_far->outer_header_creation,
+                            &default_dl->dl_far->outer_header_creation,
+                            sizeof(qos_flow->dl_far->outer_header_creation));
+                    qos_flow->dl_far->outer_header_creation_len =
+                            default_dl->dl_far->outer_header_creation_len;
+                }
+
                 smf_bearer_tft_update(qos_flow);
                 smf_bearer_qos_update(qos_flow);
 
@@ -770,6 +863,9 @@ void smf_qos_flow_binding(smf_sess_t *sess)
         }
     }
 
+    /* Fallback: bind TSC QFI when the PCC-rule loop did not (TS 23.501 §5.27.2). */
+    smf_tsc_bind_qfi(sess);
+
     check = pfcp_flags & (OGS_PFCP_MODIFY_CREATE|OGS_PFCP_MODIFY_REMOVE);
     if (check != 0 &&
         check != OGS_PFCP_MODIFY_CREATE && check != OGS_PFCP_MODIFY_REMOVE) {
@@ -778,11 +874,51 @@ void smf_qos_flow_binding(smf_sess_t *sess)
     }
 
     if (ogs_list_count(&sess->qos_flow_to_modify_list)) {
-        ogs_assert(OGS_OK ==
-                smf_5gc_pfcp_send_qos_flow_list_modification_request(
-                    sess, NULL,
-                    HOME_ROUTED_ROAMING_IN_HSMF(sess) ?
-                        OGS_PFCP_MODIFY_HOME_ROUTED_ROAMING|pfcp_flags :
-                        pfcp_flags, 0));
+        if ((pfcp_flags & OGS_PFCP_MODIFY_CREATE) &&
+                !HOME_ROUTED_ROAMING_IN_HSMF(sess) &&
+                ogs_list_count(&sess->qos_flow_to_modify_list) == 1) {
+            /*
+             * PCF-initiated SM policy update (TS 23.502 §4.3.3.2) added
+             * exactly one new QoS flow on a non-home-routed session.
+             *
+             * Route via the ONE-FLOW sender, NOT the list sender:
+             *   - The LIST sender force-ORs OGS_PFCP_MODIFY_SESSION into
+             *     xact->modify_flags (pfcp-path.c).  In the PFCP response
+             *     handler (smf_5gc_n4_handle_session_modification_response)
+             *     OGS_PFCP_MODIFY_SESSION with CREATE routes into the
+             *     Home-Routed V-SMF forwarding path
+             *     (smf_nsmf_pdusession_build_vsmf_update_data), which
+             *     immediately asserts sess->vsmf_pdu_session_uri and aborts
+             *     the SMF on any non-home-routed session.
+             *   - The ONE-FLOW sender does NOT set OGS_PFCP_MODIFY_SESSION,
+             *     so the response lands at the CREATE + NETWORK_REQUESTED
+             *     branch (n4-handler.c), which correctly issues a
+             *     PDU Session Modification Command (TS 24.501 §8.3.2) plus
+             *     NGAP PDU Session Resource Modify Request (TS 38.413 §8.2.3)
+             *     via smf_namf_comm_send_n1_n2_message_transfer.
+             *
+             * Flags: NETWORK_REQUESTED | CREATE (no SESSION).
+             * The PMIC-only and IP-session paths are unaffected: they either
+             * have no CREATE flag or use the list sender for multi-flow / HR.
+             */
+            ogs_lnode_t *node =
+                    ogs_list_first(&sess->qos_flow_to_modify_list);
+            ogs_assert(node);
+            smf_bearer_t *created_flow =
+                    ogs_container_of(node, smf_bearer_t, to_modify_node);
+            ogs_assert(created_flow);
+            ogs_assert(OGS_OK ==
+                    smf_5gc_pfcp_send_one_qos_flow_modification_request(
+                        created_flow, NULL,
+                        OGS_PFCP_MODIFY_NETWORK_REQUESTED|
+                            OGS_PFCP_MODIFY_CREATE, 0));
+        } else {
+            ogs_assert(OGS_OK ==
+                    smf_5gc_pfcp_send_qos_flow_list_modification_request(
+                        sess, NULL,
+                        HOME_ROUTED_ROAMING_IN_HSMF(sess) ?
+                            OGS_PFCP_MODIFY_HOME_ROUTED_ROAMING|pfcp_flags :
+                            pfcp_flags, 0));
+        }
     }
 }

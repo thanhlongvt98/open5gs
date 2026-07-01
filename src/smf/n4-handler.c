@@ -184,6 +184,37 @@ uint8_t smf_5gc_n4_handle_session_establishment_response(
     if (cause_value != OGS_PFCP_CAUSE_REQUEST_ACCEPTED)
         return cause_value;
 
+    /* ingest the assigned DS-TT port number from the UPF's
+     * created_bridge_info_for_tsc (TS 29.244, 4-octet big-endian). */
+    if (sess->tsc_bridge.bridge &&
+            rsp->created_bridge_info_for_tsc.presence &&
+            rsp->created_bridge_info_for_tsc.ds_tt_port_number.presence) {
+        ogs_pfcp_tlv_ds_tt_port_number_t *p =
+            &rsp->created_bridge_info_for_tsc.ds_tt_port_number;
+        if (p->len >= sizeof(uint32_t))
+            sess->tsc_bridge.ds_tt_port = be32toh(*(uint32_t *)p->data);
+        ogs_info("[SMF] 5GS-TSN bridge: DS-TT port[%u] (PSI[%d])",
+                sess->tsc_bridge.ds_tt_port, sess->psi);
+
+        /* Report the 5GS TSN bridge to the PCF (which relays it to the TSN
+         * AF) via Npcf_SMPolicyControl_Update (TS 29.512 R19 §4.2.4.23,
+         * TSN_BRIDGE_INFO trigger).  In normal session setup the PCF policy
+         * association is established before the PFCP response arrives, but
+         * defer if the association is not yet ready to avoid a silent drop. */
+        if (sess->policy_association.resource_uri) {
+            int r = smf_sbi_discover_and_send(
+                    OGS_SBI_SERVICE_TYPE_NPCF_SMPOLICYCONTROL, NULL,
+                    smf_npcf_smpolicycontrol_build_update_tsn_bridge,
+                    sess, NULL, 0, NULL);
+            ogs_expect(r == OGS_OK);
+        } else {
+            ogs_warn("[SMF] PCF policy association not ready at DS-TT port "
+                    "assignment (PSI[%d]); deferring TSN_BRIDGE_INFO notify",
+                    sess->psi);
+            sess->tsc_bridge.notify_pending = true;
+        }
+    }
+
     for (i = 0; i < OGS_MAX_NUM_OF_PDR; i++) {
         pdr = ogs_pfcp_handle_created_pdr(
                 &sess->pfcp, &rsp->created_pdr[i],
@@ -968,18 +999,19 @@ void smf_5gc_n4_handle_session_modification_response(
         } else if (flags & OGS_PFCP_MODIFY_NETWORK_REQUESTED) {
             smf_n1_n2_message_transfer_param_t param;
 
-            ogs_assert(flags & OGS_PFCP_MODIFY_SESSION);
-
             /*
-             * TS24.501
-             * 6.2 General on elementary 5GSM procedures
-             * 6.2.1 Principles of PTI handling for 5GSM procedures
+             * TS 23.502 §4.3.3.2: PCF-initiated SM policy update → SMF
+             * issues one PFCP round-trip then one N1N2 transfer.
              *
-             * If a command message is not sent as result of
-             * a received request message, the sending entity shall
-             * include in the command message the PTI value set to
-             * "no procedure transaction identity assigned"
-             * (see examples in figure 6.2.1.4).
+             * When the new QoS flow was dispatched via the ONE-FLOW sender
+             * (smf_5gc_pfcp_send_one_qos_flow_modification_request, used for
+             * a single newly-created non-HR flow) OGS_PFCP_MODIFY_SESSION is
+             * NOT set — do not assert it here.  The list sender (used for HR
+             * and multi-flow) does set OGS_PFCP_MODIFY_SESSION; both reach
+             * this branch and are handled identically below.
+             *
+             * TS 24.501 §6.2.1: if no request triggered this command, set PTI
+             * to "no procedure transaction identity assigned".
              */
             sess->pti = OGS_NAS_PROCEDURE_TRANSACTION_IDENTITY_UNASSIGNED;
 
@@ -990,12 +1022,15 @@ void smf_5gc_n4_handle_session_modification_response(
                     OGS_NAS_QOS_CODE_CREATE_NEW_QOS_RULE,
                     OGS_NAS_CREATE_NEW_QOS_FLOW_DESCRIPTION);
             ogs_assert(param.n1smbuf);
+            smf_tsc_bind_qfi(sess);
             param.n2smbuf =
                 ngap_build_pdu_session_resource_modify_request_transfer(
                         sess, true);
             ogs_assert(param.n2smbuf);
 
             smf_namf_comm_send_n1_n2_message_transfer(sess, NULL, &param);
+
+            smf_tsc_send_n2_follow_up_if_needed(sess);
 
         } else {
             ogs_fatal("Unknown flags [0x%llx]", (long long)flags);
@@ -1035,6 +1070,7 @@ void smf_5gc_n4_handle_session_modification_response(
             param.n1smbuf = gsm_build_pdu_session_modification_command(
                     sess, qos_rule_code, qos_flow_description_code);
             ogs_assert(param.n1smbuf);
+            smf_tsc_bind_qfi(sess);
             param.n2smbuf =
                 ngap_build_pdu_session_resource_modify_request_transfer(
                     sess,
@@ -1042,6 +1078,8 @@ void smf_5gc_n4_handle_session_modification_response(
             ogs_assert(param.n2smbuf);
 
             smf_namf_comm_send_n1_n2_message_transfer(sess, NULL, &param);
+
+            smf_tsc_send_n2_follow_up_if_needed(sess);
 
         } else if (flags & OGS_PFCP_MODIFY_UE_REQUESTED) {
             ogs_pkbuf_t *n1smbuf = NULL, *n2smbuf = NULL;
@@ -1053,6 +1091,7 @@ void smf_5gc_n4_handle_session_modification_response(
                     sess, qos_rule_code, qos_flow_description_code);
             ogs_assert(n1smbuf);
 
+            smf_tsc_bind_qfi(sess);
             n2smbuf = ngap_build_pdu_session_resource_modify_request_transfer(
                     sess,
                     (flags & OGS_PFCP_MODIFY_QOS_MODIFY) ? true : false);
@@ -1739,6 +1778,19 @@ uint8_t smf_n4_handle_session_report_request(
             if (use_rep->urr_id.presence == 0)
                 continue;
             urr_id = use_rep->urr_id.u32;
+
+            /* Ethernet Traffic Information -> MAC Addresses Detected carries no
+             * volume measurement, so skip the volume/Gy path below (parsing the
+             * absent IE would fault). End-station MAC learning for CNC stream
+             * binding is NOT done here: the spec mechanism is IEEE 802.1AB LLDP
+             * connectivity discovery at the DS-TT/NW-TT (TS 23.501 5.28.1),
+             * reported to the AF out-of-band — not a UPF->SMF->PCF relay. */
+            if (use_rep->ethernet_traffic_information.presence &&
+                use_rep->ethernet_traffic_information.
+                        mac_addresses_detected.presence) {
+                continue;
+            }
+
             if (!bearer || !bearer->urr || bearer->urr->id != urr_id)
                 continue;
             decoded = ogs_pfcp_parse_volume_measurement(
@@ -1757,6 +1809,7 @@ uint8_t smf_n4_handle_session_report_request(
             sess->gy.reporting_reason =
                 smf_pfcp_urr_usage_report_trigger2diam_gy_reporting_reason(&rep_trig);
         }
+
         switch (smf_use_gy_iface()) {
         case 1:
             if (!sess->gy.final_unit) {

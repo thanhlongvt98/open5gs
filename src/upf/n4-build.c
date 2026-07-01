@@ -32,6 +32,8 @@ ogs_pkbuf_t *upf_n4_build_session_establishment_response(uint8_t type,
     ogs_pfcp_node_id_t node_id;
     ogs_pfcp_f_seid_t f_seid;
     int len = 0;
+    int node_id_len = 0;
+    uint32_t ds_tt_be = 0; /* big-endian DS-TT port; must outlive ogs_pfcp_build_msg() */
 
     ogs_debug("Session Establishment Response");
 
@@ -44,10 +46,10 @@ ogs_pkbuf_t *upf_n4_build_session_establishment_response(uint8_t type,
     rsp = &pfcp_message->pfcp_session_establishment_response;
 
     /* Node ID */
-    ogs_pfcp_sockaddr_to_node_id(&node_id, &len);
+    ogs_pfcp_sockaddr_to_node_id(&node_id, &node_id_len);
     rsp->node_id.presence = 1;
     rsp->node_id.data = &node_id;
-    rsp->node_id.len = len;
+    rsp->node_id.len = node_id_len;
 
     /* Cause */
     rsp->cause.presence = 1;
@@ -59,6 +61,25 @@ ogs_pkbuf_t *upf_n4_build_session_establishment_response(uint8_t type,
     rsp->up_f_seid.presence = 1;
     rsp->up_f_seid.data = &f_seid;
     rsp->up_f_seid.len = len;
+
+    /* When the SMF requested a 5GS-TSN-bridge port for this session, return
+     * the Created Bridge Info for TSC IE (TS 29.244 R17 §5.26.2).  Both
+     * sub-IEs are conditionally mandatory when BII=1 was received:
+     *   - DS-TT Port Number (§8.2.141): the UPF-allocated port index.
+     *   - 5GS User Plane Node (§8.2.143): the UPF node identity (= Bridge
+     *     ID per TS 23.501 R17 §5.28.1), same encoding as Node ID (§8.2.24).
+     * The node_id variable is valid until ogs_pfcp_build_msg() copies the
+     * TLV payload; its stack lifetime covers the build call below. */
+    if (sess->nwtt.bridge) {
+        ds_tt_be = htobe32(sess->nwtt.ds_tt_port_number);
+        rsp->created_bridge_info_for_tsc.presence = 1;
+        rsp->created_bridge_info_for_tsc.ds_tt_port_number.presence = 1;
+        rsp->created_bridge_info_for_tsc.ds_tt_port_number.data = &ds_tt_be;
+        rsp->created_bridge_info_for_tsc.ds_tt_port_number.len = sizeof(ds_tt_be);
+        rsp->created_bridge_info_for_tsc.fivegs_user_plane_node.presence = 1;
+        rsp->created_bridge_info_for_tsc.fivegs_user_plane_node.data = &node_id;
+        rsp->created_bridge_info_for_tsc.fivegs_user_plane_node.len = node_id_len;
+    }
 
     ogs_pfcp_pdrbuf_init();
 

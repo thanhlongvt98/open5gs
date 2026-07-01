@@ -618,7 +618,9 @@ int smf_5gc_pfcp_send_all_pdr_modification_request(
     ogs_pfcp_pdr_t *pdr = NULL;
 
     ogs_assert(sess);
-    if ((flags & OGS_PFCP_MODIFY_ERROR_INDICATION) == 0)
+    /* ERROR_INDICATION and TSC (PMIC delivery) are network-initiated: there is no SBI
+     * requester to answer, so a NULL stream is valid (the body guards on `stream`). */
+    if ((flags & (OGS_PFCP_MODIFY_ERROR_INDICATION | OGS_PFCP_MODIFY_TSC)) == 0)
         ogs_assert(stream);
 
     xact = ogs_pfcp_xact_local_create(

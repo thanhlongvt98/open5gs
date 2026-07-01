@@ -22,6 +22,204 @@
 #include "gtp-path.h"
 #include "n4-handler.h"
 
+#define NWTT_GCL_MAX_ENTRIES 64
+#define NWTT_TAP_IFACE       "ogstapeth"
+
+typedef struct {
+    uint8_t  gate_states;
+    uint32_t dur_ns;
+} upf_gcl_entry_t;
+
+typedef struct {
+    bool     gate_enabled;
+    uint64_t base_ns;
+    uint64_t cycle_ns;
+    int      n;
+    upf_gcl_entry_t entries[NWTT_GCL_MAX_ENTRIES];
+} upf_gcl_t;
+
+/* Minimal base64 decoder (the UPF does not link ogs-crypt). Returns decoded length. */
+static int upf_b64_decode(const char *in, uint8_t *out, int outcap)
+{
+    int n = 0, bits = 0, acc = 0, v;
+    for (; in && *in; in++) {
+        char c = *in;
+        if (c >= 'A' && c <= 'Z')      v = c - 'A';
+        else if (c >= 'a' && c <= 'z') v = c - 'a' + 26;
+        else if (c >= '0' && c <= '9') v = c - '0' + 52;
+        else if (c == '+')             v = 62;
+        else if (c == '/')             v = 63;
+        else                           continue; /* '=' padding / whitespace */
+        acc = (acc << 6) | v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            if (n < outcap)
+                out[n++] = (uint8_t)((acc >> bits) & 0xFF);
+        }
+    }
+    return n;
+}
+
+/* Parse the NW-TT PMIC (TS 24.539 MANAGE PORT COMMAND, base64-encoded as carried over
+ * N5/N4) into the 802.1Qbv gate's allowed-PCP set: the OR of every AdminControlList
+ * entry's GateStatesValue bitmap (bit p set => PCP p is gated open). Returns 0 on any
+ * parse failure so the data path fails open (enforces nothing). */
+static uint8_t upf_pmic_parse_gate_pcp_mask(const void *b64)
+{
+    uint8_t raw[512], mask = 0;
+    int n, i, end;
+    uint16_t list_len, name, vlen, j;
+
+    if (!b64)
+        return 0;
+    n = upf_b64_decode((const char *)b64, raw, sizeof(raw));
+    /* MANAGE PORT COMMAND: msg_type(1)=0x01 | port-management-list length(2) | operations. */
+    if (n < 3 || raw[0] != 0x01)
+        return 0;
+    list_len = (raw[1] << 8) | raw[2];
+    i = 3;
+    end = (3 + (int)list_len <= n) ? 3 + (int)list_len : n;
+    /* Set-parameter op: op-code(1) | port-parameter name(2) | value-length(2) | value. */
+    while (i + 5 <= end) {
+        name = (raw[i + 1] << 8) | raw[i + 2];
+        vlen = (raw[i + 3] << 8) | raw[i + 4];
+        if (i + 5 + (int)vlen > end)
+            break;
+        /* AdminControlList (0x0006): entries of [gate-op(1), GateStatesValue(1), time(4)]. */
+        if (name == 0x0006)
+            for (j = 0; j + 6 <= vlen; j += 6)
+                mask |= raw[i + 5 + j + 1];
+        i += 5 + vlen;
+    }
+    return mask;
+}
+
+/* Parse the full GCL from the PMIC into gcl_out. Returns true on success. */
+static bool upf_pmic_parse_gcl(const void *b64, upf_gcl_t *gcl_out)
+{
+    uint8_t raw[512];
+    int n, i, end;
+    uint16_t list_len, name, vlen, j;
+
+    memset(gcl_out, 0, sizeof(*gcl_out));
+    if (!b64)
+        return false;
+    n = upf_b64_decode((const char *)b64, raw, sizeof(raw));
+    if (n < 3 || raw[0] != 0x01)
+        return false;
+
+    list_len = ((uint16_t)raw[1] << 8) | raw[2];
+    i = 3;
+    end = (3 + (int)list_len <= n) ? 3 + (int)list_len : n;
+
+    while (i + 5 <= end) {
+        name = ((uint16_t)raw[i + 1] << 8) | raw[i + 2];
+        vlen = ((uint16_t)raw[i + 3] << 8) | raw[i + 4];
+        if (i + 5 + (int)vlen > end)
+            break;
+        const uint8_t *v = &raw[i + 5];
+
+        if (name == 0x0003 && vlen >= 1) {
+            gcl_out->gate_enabled = (v[0] & 0x01) != 0;
+
+        } else if (name == 0x0004 && vlen >= 10) {
+            /* ADMIN_BASE_TIME: 6-octet secs + 4-octet nanos */
+            uint64_t secs = 0;
+            for (int k = 0; k < 6; k++) secs = (secs << 8) | v[k];
+            uint32_t nanos = ((uint32_t)v[6] << 24) | ((uint32_t)v[7] << 16) |
+                             ((uint32_t)v[8] << 8)  |  (uint32_t)v[9];
+            gcl_out->base_ns = secs * 1000000000ULL + nanos;
+
+        } else if (name == 0x0007 && vlen >= 8) {
+            /* ADMIN_CYCLE_TIME: num/den; den=1e9 => cycle_ns=num */
+            uint32_t num = ((uint32_t)v[0] << 24) | ((uint32_t)v[1] << 16) |
+                           ((uint32_t)v[2] << 8)  |  (uint32_t)v[3];
+            uint32_t den = ((uint32_t)v[4] << 24) | ((uint32_t)v[5] << 16) |
+                           ((uint32_t)v[6] << 8)  |  (uint32_t)v[7];
+            gcl_out->cycle_ns = (den > 0) ? ((uint64_t)num * 1000000000ULL / den) : num;
+
+        } else if (name == 0x0006) {
+            /* ADMIN_CONTROL_LIST: [gate-op(1), GateStates(1), TimeInterval(4)] */
+            for (j = 0; j + 6 <= vlen && gcl_out->n < NWTT_GCL_MAX_ENTRIES; j += 6) {
+                gcl_out->entries[gcl_out->n].gate_states = v[j + 1];
+                gcl_out->entries[gcl_out->n].dur_ns =
+                    ((uint32_t)v[j + 2] << 24) | ((uint32_t)v[j + 3] << 16) |
+                    ((uint32_t)v[j + 4] << 8)  |  (uint32_t)v[j + 5];
+                gcl_out->n++;
+            }
+        }
+        i += 5 + vlen;
+    }
+    return gcl_out->cycle_ns > 0 && gcl_out->n > 0;
+}
+
+/* Program tc taprio + clsact/flower classifier on the NW-TT egress TAP.
+ * The TAP is created with IFF_MULTI_QUEUE (see ogs_tun_open), which is
+ * sufficient for taprio: netif_is_multiqueue() checks the device's allocated
+ * queue count, not the number of attached fds, so no extra fds are needed. */
+static void nwtt_program_taprio(const upf_gcl_t *gcl)
+{
+    char cmd[2048];
+    int pos;
+
+    if (!gcl->gate_enabled || gcl->cycle_ns == 0 || gcl->n == 0)
+        return;
+
+    /* clsact (idempotent: delete then add) */
+    snprintf(cmd, sizeof(cmd),
+             "/usr/sbin/tc qdisc del dev %s clsact 2>/dev/null; "
+             "/usr/sbin/tc qdisc add dev %s clsact",
+             NWTT_TAP_IFACE, NWTT_TAP_IFACE);
+    if (system(cmd) != 0) {
+        ogs_warn("[UPF] NW-TT taprio: clsact add failed on %s; staying on C2(a)", NWTT_TAP_IFACE);
+        return;
+    }
+
+    /* egress flower PCP→TC classifier */
+    for (int pcp = 0; pcp < 8; pcp++) {
+        snprintf(cmd, sizeof(cmd),
+                 "/usr/sbin/tc filter add dev %s egress protocol 802.1Q "
+                 "flower vlan_prio %d action skbedit priority %d",
+                 NWTT_TAP_IFACE, pcp, pcp);
+        system(cmd);
+    }
+
+    /* taprio qdisc — testbed: num_tc 1 maps every priority to TC0 / queue 0.
+     * The TAP has a single reader fd (real_num_tx_queues == 1), so all egress
+     * already lands on queue 0 — no scatter to unread queues.  Per-TC gating
+     * needs a real NIC; this proves decode + install only. */
+    pos = snprintf(cmd, sizeof(cmd),
+        "/usr/sbin/tc qdisc replace dev %s root taprio"
+        " num_tc 1 map 0 0 0 0 0 0 0 0"
+        " queues 1@0"
+        " base-time %llu"
+        " clockid CLOCK_TAI flags 0",
+        NWTT_TAP_IFACE, (unsigned long long)gcl->base_ns);
+
+    for (int e = 0; e < gcl->n && pos < (int)sizeof(cmd) - 64; e++) {
+        uint8_t gs1 = gcl->entries[e].gate_states ? 0x01 : 0x00;
+        pos += snprintf(cmd + pos, sizeof(cmd) - pos,
+                        " sched-entry S 0x%02x %u",
+                        gs1, gcl->entries[e].dur_ns);
+    }
+
+    if (system(cmd) != 0) {
+        ogs_warn("[UPF] NW-TT taprio: qdisc replace failed on %s; staying on C2(a)",
+                 NWTT_TAP_IFACE);
+        /* Drop the clsact classifier so we are fully back to C2(a). */
+        snprintf(cmd, sizeof(cmd), "/usr/sbin/tc qdisc del dev %s clsact 2>/dev/null", NWTT_TAP_IFACE);
+        system(cmd);
+        return;
+    }
+
+    ogs_info("[UPF] NW-TT taprio programmed on %s: cycle=%lluns base=%lluns entries=%d",
+             NWTT_TAP_IFACE,
+             (unsigned long long)gcl->cycle_ns,
+             (unsigned long long)gcl->base_ns,
+             gcl->n);
+}
+
 static void upf_n4_handle_create_urr(upf_sess_t *sess, ogs_pfcp_tlv_create_urr_t *create_urr_arr,
                               uint8_t *cause_value, uint8_t *offending_ie_value)
 {
@@ -211,6 +409,24 @@ void upf_n4_handle_session_establishment_request(
         }
     }
 
+    /* record the PDU session type as UPF-local correlation
+     * state (logs creation for an Ethernet PDU session). Done independently of
+     * the UE-IP block above, since an Ethernet session carries no UE IP. */
+    if (req->pdn_type.presence == 1)
+        upf_sess_set_correlation(sess, req->pdn_type.u8);
+
+    /* the SMF requests creation of this session's 5GS-TSN-bridge
+     * port via the standard PFCP create_bridge_info_for_tsc IE (TS 29.244). Assign
+     * a DS-TT port number; it is returned in created_bridge_info_for_tsc in the
+     * establishment response (see upf_n4_build_session_establishment_response). */
+    if (req->create_bridge_info_for_tsc.presence) {
+        sess->nwtt.bridge = true;
+        sess->nwtt.ds_tt_port_number = upf_sess_assign_dstt_port();
+        ogs_info("[UPF] NW-TT bridge port created: DS-TT port[%u] (SMF-SEID[0x%llx])",
+                 sess->nwtt.ds_tt_port_number,
+                 (unsigned long long)sess->smf_n4_f_seid.seid);
+    }
+
     /* Send Buffered Packet to gNB/SGW */
     ogs_list_for_each(&sess->pfcp.pdr_list, pdr) {
         if (pdr->src_if == OGS_PFCP_INTERFACE_CORE) { /* Downlink */
@@ -264,6 +480,49 @@ void upf_n4_handle_session_modification_request(
                 OGS_PFCP_SESSION_MODIFICATION_RESPONSE_TYPE,
                 OGS_PFCP_CAUSE_SESSION_CONTEXT_NOT_FOUND, 0);
         return;
+    }
+
+    /* the SMF carries the NW-TT Port Management Information
+     * Container (PMIC = the CNC's PSFP stream filter/gate tables) inside the
+     * standard PFCP tsc_management_information IE (TS 29.244). Record receipt;
+     * parsing/enforcing the PSFP tables is deferred to a later step. */
+    if (req->tsc_management_information.presence) {
+        ogs_pfcp_tlv_port_management_information_container_t *pmic =
+            &req->tsc_management_information.port_management_information_container;
+        if (pmic->presence) {
+            /* program the NW-TT port — store the PMIC managed
+             * object (PSFP stream filter + gate-control list). Best-effort:
+             * the blob is retained on the port for the data-path to consult;
+             * hard gate enforcement is a later refinement. */
+            sess->nwtt.pmic_present = true;
+            sess->nwtt.pmic_len = pmic->len;
+            if (sess->nwtt.pmic)
+                ogs_free(sess->nwtt.pmic);
+            sess->nwtt.pmic = ogs_calloc(1, pmic->len + 1);
+            if (sess->nwtt.pmic && pmic->data)
+                memcpy(sess->nwtt.pmic, pmic->data, pmic->len);
+            /* C2(a): allowed-PCP set for the data-path gate. */
+            sess->nwtt.gate_pcp_mask =
+                upf_pmic_parse_gate_pcp_mask(sess->nwtt.pmic);
+            ogs_info("[UPF] NW-TT PMIC applied: %u octets, gate PCP mask[0x%02x], "
+                     "NW-TT port[%u] (DS-TT port[%u])", pmic->len,
+                     sess->nwtt.gate_pcp_mask,
+                     req->tsc_management_information.nw_tt_port_number.presence ?
+                        be32toh(*(uint32_t *)req->tsc_management_information.
+                            nw_tt_port_number.data) : 0,
+                     sess->nwtt.ds_tt_port_number);
+
+            /* C2(b): decode the full GCL and program taprio on the NW-TT egress. */
+            upf_gcl_t gcl;
+            if (upf_pmic_parse_gcl(sess->nwtt.pmic, &gcl)) {
+                ogs_info("[UPF] NW-TT GCL decoded: cycle=%lluns base=%lluns entries=%d",
+                         (unsigned long long)gcl.cycle_ns,
+                         (unsigned long long)gcl.base_ns, gcl.n);
+                nwtt_program_taprio(&gcl);
+            } else {
+                ogs_warn("[UPF] NW-TT: GCL decode failed; only C2(a) active");
+            }
+        }
     }
 
     for (i = 0; i < OGS_MAX_NUM_OF_PDR; i++) {

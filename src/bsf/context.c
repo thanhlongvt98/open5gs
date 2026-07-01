@@ -42,6 +42,8 @@ void bsf_context_init(void)
     ogs_assert(self.ipv4addr_hash);
     self.ipv6prefix_hash = ogs_hash_make();
     ogs_assert(self.ipv6prefix_hash);
+    self.mac_addr_hash = ogs_hash_make();
+    ogs_assert(self.mac_addr_hash);
 
     context_initialized = 1;
 }
@@ -56,6 +58,8 @@ void bsf_context_final(void)
     ogs_hash_destroy(self.ipv4addr_hash);
     ogs_assert(self.ipv6prefix_hash);
     ogs_hash_destroy(self.ipv6prefix_hash);
+    ogs_assert(self.mac_addr_hash);
+    ogs_hash_destroy(self.mac_addr_hash);
 
     ogs_pool_final(&bsf_sess_pool);
 
@@ -200,6 +204,11 @@ void bsf_sess_remove(bsf_sess_t *sess)
                 &sess->ipv6prefix, (sess->ipv6prefix.len >> 3) + 1, NULL);
         ogs_free(sess->ipv6prefix_string);
     }
+    if (sess->mac_addr48_string) {
+        ogs_hash_set(self.mac_addr_hash,
+                sess->mac_addr, 6, NULL);
+        ogs_free(sess->mac_addr48_string);
+    }
 
     OpenAPI_clear_and_free_string_list(sess->ipv4_frame_route_list);
     OpenAPI_clear_and_free_string_list(sess->ipv6_frame_route_list);
@@ -341,6 +350,75 @@ bsf_sess_t *bsf_sess_find_by_ipv4addr(
     }
 
     return ogs_hash_get(self.ipv4addr_hash, &ipv4addr, sizeof(ipv4addr));
+}
+
+bool bsf_sess_set_mac_addr(bsf_sess_t *sess, char *mac_addr48_string)
+{
+    ogs_assert(sess);
+    ogs_assert(mac_addr48_string);
+
+    if (sess->mac_addr48_string) {
+        ogs_hash_set(self.mac_addr_hash,
+                sess->mac_addr, 6, NULL);
+        ogs_free(sess->mac_addr48_string);
+    }
+    if (ogs_mac_from_string(sess->mac_addr, mac_addr48_string) == false) {
+        ogs_error("ogs_mac_from_string[%s] failed", mac_addr48_string);
+        return false;
+    }
+    sess->mac_addr48_string = ogs_strdup(mac_addr48_string);
+    if (!sess->mac_addr48_string) {
+        ogs_error("ogs_strdup() failed");
+        return false;
+    }
+    ogs_hash_set(self.mac_addr_hash,
+            sess->mac_addr, 6, sess);
+    return true;
+}
+
+bsf_sess_t *bsf_sess_add_by_mac_address(char *mac_addr48_string)
+{
+    bsf_sess_t *sess = NULL;
+
+    ogs_assert(mac_addr48_string);
+
+    ogs_pool_alloc(&bsf_sess_pool, &sess);
+    if (!sess) {
+        ogs_error("Maximum number of session[%lld] reached",
+            (long long)ogs_app()->pool.sess);
+        return NULL;
+    }
+    memset(sess, 0, sizeof *sess);
+
+    if (bsf_sess_set_mac_addr(sess, mac_addr48_string) == false) {
+        ogs_error("bsf_sess_set_mac_addr[%s] failed", mac_addr48_string);
+        ogs_pool_free(&bsf_sess_pool, sess);
+        return NULL;
+    }
+
+    OGS_SBI_FEATURES_SET(sess->management_features,
+            OGS_SBI_NBSF_MANAGEMENT_BINDING_UPDATE);
+
+    sess->binding_id = ogs_msprintf("%d",
+            (int)ogs_pool_index(&bsf_sess_pool, sess));
+    ogs_assert(sess->binding_id);
+
+    ogs_list_add(&self.sess_list, sess);
+
+    return sess;
+}
+
+bsf_sess_t *bsf_sess_find_by_mac_addr(char *mac_addr48_string)
+{
+    uint8_t mac[6];
+
+    ogs_assert(mac_addr48_string);
+
+    if (ogs_mac_from_string(mac, mac_addr48_string) == false) {
+        ogs_error("ogs_mac_from_string() failed");
+        return NULL;
+    }
+    return ogs_hash_get(self.mac_addr_hash, mac, 6);
 }
 
 bsf_sess_t *bsf_sess_find_by_ipv6prefix(

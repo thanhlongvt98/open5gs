@@ -58,6 +58,9 @@ ogs_sbi_request_t *pcf_nbsf_management_build_register(
 
     PcfBinding.ipv4_addr = sess->ipv4addr_string;
     PcfBinding.ipv6_prefix = sess->ipv6prefix_string;
+    /* Ethernet PDU session has no UE IP — bind by DS-TT MAC
+     * (TS 29.521 PcfBinding.macAddr48), set once the NW-TT reports it. */
+    PcfBinding.mac_addr48 = sess->mac_addr48_string;
 
     PcfBinding.ipv4_frame_route_list = sess->ipv4_frame_route_list;
     PcfBinding.ipv6_frame_route_list = sess->ipv6_frame_route_list;

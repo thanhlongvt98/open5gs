@@ -1603,6 +1603,124 @@ void smf_gsm_state_operational(ogs_fsm_t *s, smf_event_t *e)
             stream = ogs_sbi_stream_find_by_id(stream_id);
 
         SWITCH(sbi_message->h.service.name)
+        CASE(OGS_SBI_SERVICE_NAME_NPCF_SMPOLICYCONTROL)
+            stream_id = OGS_POINTER_TO_UINT(e->h.sbi.data);
+            if (stream_id >= OGS_MIN_POOL_ID && stream_id <= OGS_MAX_POOL_ID)
+                stream = ogs_sbi_stream_find_by_id(stream_id);
+
+            int state = e->h.sbi.state;
+
+            SWITCH(sbi_message->h.resource.component[0])
+            CASE(OGS_SBI_RESOURCE_NAME_SM_POLICIES)
+                if (!sbi_message->h.resource.component[1]) {
+                    ogs_assert(stream);
+                    strerror = ogs_msprintf(
+                            "[%s:%d] HTTP response error [%d]",
+                            smf_ue->supi, sess->psi,
+                            sbi_message->res_status);
+                    ogs_assert(strerror);
+
+                    ogs_error("%s", strerror);
+                    ogs_assert(true ==
+                        ogs_sbi_server_send_error(
+                            stream, sbi_message->res_status,
+                            sbi_message, strerror, NULL,
+                            (sbi_message->ProblemDetails) ?
+                                    sbi_message->ProblemDetails->cause : NULL));
+                    ogs_free(strerror);
+
+                    OGS_FSM_TRAN(s, smf_gsm_state_exception);
+                    break;
+                } else {
+                    SWITCH(sbi_message->h.resource.component[2])
+                    CASE(OGS_SBI_RESOURCE_NAME_DELETE)
+                        PCF_SM_POLICY_CLEAR(sess);
+
+                        if (sbi_message->res_status !=
+                                OGS_SBI_HTTP_STATUS_NO_CONTENT) {
+                            ogs_error("[%s:%d] HTTP response error [%d]",
+                                    smf_ue->supi, sess->psi,
+                                    sbi_message->res_status);
+                            /* In spite of error from PCF, continue with
+                               session teardown, so as to not leave stale
+                               sessions. */
+                        }
+
+                        if (state == OGS_PFCP_DELETE_TRIGGER_SMF_INITIATED) {
+                            OGS_FSM_TRAN(&sess->sm, smf_gsm_state_wait_5gc_n1_n2_release);
+
+                            smf_n1_n2_message_transfer_param_t param;
+
+                            memset(&param, 0, sizeof(param));
+                            param.state = SMF_UE_OR_NETWORK_REQUESTED_PDU_SESSION_RELEASE;
+                            sess->pti = OGS_NAS_PROCEDURE_TRANSACTION_IDENTITY_UNASSIGNED;
+                            param.n1smbuf = gsm_build_pdu_session_release_command(
+                                sess, OGS_5GSM_CAUSE_REACTIVATION_REQUESTED);
+                            ogs_assert(param.n1smbuf);
+
+                            param.n2smbuf =
+                                ngap_build_pdu_session_resource_release_command_transfer(
+                                    sess, SMF_NGAP_STATE_DELETE_TRIGGER_SMF_INITIATED,
+                                    NGAP_Cause_PR_nas, NGAP_CauseNas_normal_release);
+                            ogs_assert(param.n2smbuf);
+
+                            smf_namf_comm_send_n1_n2_message_transfer(sess, NULL, &param);
+                        } else {
+                            OGS_FSM_TRAN(&sess->sm,
+                                    &smf_gsm_state_wait_pfcp_deletion);
+                        }
+                        break;
+
+                    CASE(OGS_SBI_RESOURCE_NAME_UPDATE)
+                        /* response to the SMF-initiated SM Policy
+                         * Association Update that reported tsnBridgeInfo (TS 29.512
+                         * §4.2.4). Consume it without a state transition — this is a
+                         * side report during/after establishment, NOT a session
+                         * teardown trigger. */
+                        if (sbi_message->res_status != OGS_SBI_HTTP_STATUS_OK &&
+                                sbi_message->res_status !=
+                                        OGS_SBI_HTTP_STATUS_NO_CONTENT) {
+                            ogs_warn("[%s:%d] SM Policy update (tsnBridgeInfo) "
+                                    "response [%d]", smf_ue->supi, sess->psi,
+                                    sbi_message->res_status);
+                        }
+                        break;
+
+                    DEFAULT
+                        strerror = ogs_msprintf("[%s:%d] "
+                                "Unknown resource name [%s]",
+                                smf_ue->supi, sess->psi,
+                                sbi_message->h.resource.component[2]);
+                        ogs_assert(strerror);
+
+                        ogs_error("%s", strerror);
+                        if (stream)
+                            ogs_assert(true ==
+                                ogs_sbi_server_send_error(stream,
+                                    OGS_SBI_HTTP_STATUS_BAD_REQUEST,
+                                    sbi_message, strerror, NULL, NULL));
+                        ogs_free(strerror);
+                        OGS_FSM_TRAN(s, smf_gsm_state_exception);
+                    END
+                }
+                break;
+
+            DEFAULT
+                strerror = ogs_msprintf("[%s:%d] Invalid resource name [%s]",
+                        smf_ue->supi, sess->psi,
+                        sbi_message->h.resource.component[0]);
+                ogs_assert(strerror);
+
+                ogs_error("%s", strerror);
+                ogs_assert(true ==
+                    ogs_sbi_server_send_error(stream,
+                        OGS_SBI_HTTP_STATUS_BAD_REQUEST,
+                        sbi_message, strerror, NULL, NULL));
+                ogs_free(strerror);
+                OGS_FSM_TRAN(s, smf_gsm_state_exception);
+            END
+            break;
+
         CASE(OGS_SBI_SERVICE_NAME_NAMF_COMM)
             SWITCH(sbi_message->h.resource.component[0])
             CASE(OGS_SBI_RESOURCE_NAME_UE_CONTEXTS)

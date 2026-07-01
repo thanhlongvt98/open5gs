@@ -179,26 +179,32 @@ ogs_pkbuf_t *gsm_build_pdu_session_establishment_accept(smf_sess_t *sess)
     ogs_nas_bitrate_from_uint64(
             &session_ambr->uplink, sess->session.ambr.uplink);
 
-    /* PDU Address */
-    pdu_session_establishment_accept->presencemask |=
-        OGS_NAS_5GS_PDU_SESSION_ESTABLISHMENT_ACCEPT_PDU_ADDRESS_PRESENT;
-    pdu_address->pdn_type = sess->session.session_type;
+    /* PDU Address
+     *
+     * TS 24.501 §9.11.4.10: the PDU Address IE carries the UE IP address and is
+     * present only for IP-type sessions. For an Ethernet PDU session there is no
+     * UE IP, so the entire IE is omitted from the ESTABLISHMENT ACCEPT. */
+    if (sess->session.session_type != OGS_PDU_SESSION_TYPE_ETHERNET) {
+        pdu_session_establishment_accept->presencemask |=
+            OGS_NAS_5GS_PDU_SESSION_ESTABLISHMENT_ACCEPT_PDU_ADDRESS_PRESENT;
+        pdu_address->pdn_type = sess->session.session_type;
 
-    if (pdu_address->pdn_type == OGS_PDU_SESSION_TYPE_IPV4) {
-        pdu_address->addr = sess->paa.addr;
-        pdu_address->length = OGS_NAS_PDU_ADDRESS_IPV4_LEN;
-    } else if (pdu_address->pdn_type == OGS_PDU_SESSION_TYPE_IPV6) {
-        memcpy(pdu_address->addr6,
-                sess->paa.addr6+(OGS_IPV6_LEN>>1), OGS_IPV6_LEN>>1);
-        pdu_address->length = OGS_NAS_PDU_ADDRESS_IPV6_LEN;
-    } else if (pdu_address->pdn_type == OGS_PDU_SESSION_TYPE_IPV4V6) {
-        pdu_address->both.addr = sess->paa.both.addr;
-        memcpy(pdu_address->both.addr6,
-            sess->paa.both.addr6+(OGS_IPV6_LEN>>1), OGS_IPV6_LEN>>1);
-        pdu_address->length = OGS_NAS_PDU_ADDRESS_IPV4V6_LEN;
-    } else {
-        ogs_error("Unexpected PDN Type %u", pdu_address->pdn_type);
-        goto cleanup;
+        if (pdu_address->pdn_type == OGS_PDU_SESSION_TYPE_IPV4) {
+            pdu_address->addr = sess->paa.addr;
+            pdu_address->length = OGS_NAS_PDU_ADDRESS_IPV4_LEN;
+        } else if (pdu_address->pdn_type == OGS_PDU_SESSION_TYPE_IPV6) {
+            memcpy(pdu_address->addr6,
+                    sess->paa.addr6+(OGS_IPV6_LEN>>1), OGS_IPV6_LEN>>1);
+            pdu_address->length = OGS_NAS_PDU_ADDRESS_IPV6_LEN;
+        } else if (pdu_address->pdn_type == OGS_PDU_SESSION_TYPE_IPV4V6) {
+            pdu_address->both.addr = sess->paa.both.addr;
+            memcpy(pdu_address->both.addr6,
+                sess->paa.both.addr6+(OGS_IPV6_LEN>>1), OGS_IPV6_LEN>>1);
+            pdu_address->length = OGS_NAS_PDU_ADDRESS_IPV4V6_LEN;
+        } else {
+            ogs_error("Unexpected PDN Type %u", pdu_address->pdn_type);
+            goto cleanup;
+        }
     }
 
     /* GSM cause */
@@ -588,6 +594,18 @@ ogs_pkbuf_t *gsm_build_pdu_session_modification_command(
             OGS_NAS_5GS_PDU_SESSION_MODIFICATION_COMMAND_AUTHORIZED_QOS_FLOW_DESCRIPTIONS_PRESENT;
     }
 
+    /* deliver the DS-TT PMIC to the UE over N1 (TS 24.501
+     * §9.11.4.27, IEI 0x74). Opaque managed-object blob from the AF/CNC. */
+    if (sess->tsc_bridge.dstt_pmic) {
+        ogs_nas_port_management_information_container_t *pmic =
+            &pdu_session_modification_command->
+                port_management_information_container;
+        pmic->length = strlen(sess->tsc_bridge.dstt_pmic);
+        pmic->buffer = sess->tsc_bridge.dstt_pmic;
+        pdu_session_modification_command->presencemask |=
+            OGS_NAS_5GS_PDU_SESSION_MODIFICATION_COMMAND_PORT_MANAGEMENT_INFORMATION_CONTAINER_PRESENT;
+    }
+
     pkbuf = ogs_nas_5gs_plain_encode(&message);
     ogs_assert(pkbuf);
 
@@ -763,10 +781,16 @@ void gsm_encode_qos_rule_packet_filter(
             qos_rule->pf[i].direction = pf->direction;
             qos_rule->pf[i].identifier = pf->identifier;
 
-            ogs_pf_content_from_ipfw_rule(
-                    pf->direction, &qos_rule->pf[i].content, &pf->ipfw_rule,
-                    ogs_global_conf()->parameter.
-                    no_ipv4v6_local_addr_in_packet_filter);
+            if (pf->is_eth) {
+                /* TSN Ethernet packet filter (TS 24.501 §9.11.4.13):
+                 * use the prebuilt L2 content instead of an IP ipfw rule. */
+                qos_rule->pf[i].content = pf->eth_content;
+            } else {
+                ogs_pf_content_from_ipfw_rule(
+                        pf->direction, &qos_rule->pf[i].content, &pf->ipfw_rule,
+                        ogs_global_conf()->parameter.
+                        no_ipv4v6_local_addr_in_packet_filter);
+            }
             i++;
         }
         qos_rule->num_of_packet_filter = i;
